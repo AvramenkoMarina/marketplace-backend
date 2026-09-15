@@ -1,8 +1,14 @@
 node_modules/
+dist/
 spec.json
 .DS_Store
 *.log
 .env
+.env.*
+!.env.example
+secrets/
 coverage/
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
+*.tsbuildinfo
