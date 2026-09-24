@@ -1,15 +1,37 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12).
 
-## Швидкий старт
+Головна таблиця: `orders`. Таблиця пошуку: `products`.
+
+Підняти базу: `docker compose up -d --wait`
+
+Підключитись: `docker compose exec -T postgres psql -U marketplace -d marketplace`
+
+Дев-креденшели стенда лежать у `docker-compose.yml` (`marketplace` / `marketplace_secret`, БД `marketplace`, порт хоста `5433`). Свіжий клон піднімає Postgres без правок файлів. Пароль застосунку — окремо, зі сховища `secrets/db_password` (див. Configuration).
+
+## Дата-шар (HW-12)
+
+Порядок такий самий, як у грейдера. Команди з кореня репозиторію, після «Підключитись»:
+
+```bash
+docker compose exec -T postgres psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 -f - < db/schema.sql
+docker compose exec -T postgres psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 -f - < db/seed.sql
+docker compose exec -T postgres psql -U marketplace -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q1.sql)"
+docker compose exec -T postgres psql -U marketplace -d marketplace -f - < db/indexes.sql
+docker compose exec -T postgres psql -U marketplace -d marketplace -c "ANALYZE;"
+docker compose exec -T postgres psql -U marketplace -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q1.sql)"
+```
+
+Те саме для `db/queries/q2.sql`, `q3.sql`, `q4.sql`. Для q4 EXPLAIN після індексу прогнати 2–3 рази. Звіт: `db/OPTIMIZATIONS.md`.
+
+## Швидкий старт застосунку
 
 ```bash
 cp .env.example .env
 mkdir -p secrets
 printf '%s' 'marketplace_secret' > secrets/db_password   # має збігатися з compose/init
 
-docker compose up -d
 npm install
 npm start
 ```
@@ -22,12 +44,12 @@ API: `http://localhost:3000`
 `validate` у `ConfigModule.forRoot` **до** створення DI-графа.
 У коді — лише `ConfigService<Env, true>`, без прямих `process.env`.
 
-| Змінна | Обовʼязкова | Опис |
-|--------|-------------|------|
-| `NODE_ENV` | ні (default `development`) | `development` \| `test` \| `production` |
-| `PORT` | ні (default `3000`) | HTTP-порт (`z.coerce.number`) |
-| `DB_URL` | так | Postgres URL **без пароля**, напр. `postgresql://marketplace@localhost:5433/marketplace` |
-| `DB_PASSWORD_FILE` | так | Шлях до файла-секрета з паролем БД |
+| Змінна | Обовʼязкова | Джерело | Опис |
+|--------|-------------|----------|------|
+| `NODE_ENV` | ні (default `development`) | процес / `.env` | `development` \| `test` \| `production` |
+| `PORT` | ні (default `3000`) | процес / `.env` | HTTP-порт (`z.coerce.number`) |
+| `DB_URL` | так | сховище | Postgres URL **без пароля**, напр. `postgresql://marketplace@localhost:5433/marketplace` |
+| `DB_PASSWORD_FILE` | так | сховище | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 

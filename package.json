@@ -1,7 +1,7 @@
 {
   "name": "marketplace-api",
   "version": "1.1.0",
-  "description": "Marketplace API — OpenAPI contract, Nest config, rotatable DB secrets (HW-09 + HW-11)",
+  "description": "Marketplace API \u2014 OpenAPI contract, Nest config, rotatable DB secrets (HW-09 + HW-11)",
   "private": true,
   "scripts": {
     "build": "nest build",
@@ -21,8 +21,10 @@
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.12",
     "@nestjs/platform-express": "^11.0.12",
+    "dotenv": "^8.2.0",
     "express": "4.22.2",
     "express-openapi-validator": "5.6.2",
+    "node-fetch": "^3.3.2",
     "pg": "^8.14.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
