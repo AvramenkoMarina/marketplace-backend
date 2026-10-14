@@ -8,8 +8,8 @@ import {
   OneToMany,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { OrderItem } from './order-item.entity';
-import { User } from './user.entity';
+import type { OrderItem } from './order-item.entity';
+import type { User } from './user.entity';
 
 @Entity('products')
 @Check('products_price_positive', '"price_cents" > 0')
@@ -24,7 +24,7 @@ export class Product {
   })
   id!: string;
 
-  @ManyToOne(() => User, (user) => user.products, {
+  @ManyToOne('User', 'products', {
     nullable: false,
     onDelete: 'RESTRICT',
   })
@@ -54,6 +54,6 @@ export class Product {
   })
   searchVector!: string;
 
-  @OneToMany(() => OrderItem, (item) => item.product)
+  @OneToMany('OrderItem', 'product')
   orderItems!: OrderItem[];
 }

@@ -6,8 +6,8 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { Order } from './order.entity';
-import { Product } from './product.entity';
+import type { Order } from './order.entity';
+import type { Product } from './product.entity';
 
 @Entity('order_items')
 @Check('order_items_qty_positive', '"qty" > 0')
@@ -19,14 +19,14 @@ export class OrderItem {
   })
   id!: string;
 
-  @ManyToOne(() => Order, (order) => order.items, {
+  @ManyToOne('Order', 'items', {
     nullable: false,
     onDelete: 'CASCADE',
   })
   @JoinColumn({ name: 'order_id' })
   order!: Order;
 
-  @ManyToOne(() => Product, (product) => product.orderItems, {
+  @ManyToOne('Product', 'orderItems', {
     nullable: false,
     onDelete: 'RESTRICT',
   })

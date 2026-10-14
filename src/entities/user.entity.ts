@@ -6,8 +6,8 @@ import {
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
-import { Order } from './order.entity';
-import { Product } from './product.entity';
+import type { Order } from './order.entity';
+import type { Product } from './product.entity';
 
 @Entity('users')
 @Unique('users_email_unique', ['email'])
@@ -29,9 +29,9 @@ export class User {
   @Column({ type: 'timestamptz', name: 'created_at', default: () => 'now()' })
   createdAt!: Date;
 
-  @OneToMany(() => Product, (product) => product.seller)
+  @OneToMany('Product', 'seller')
   products!: Product[];
 
-  @OneToMany(() => Order, (order) => order.buyer)
+  @OneToMany('Order', 'buyer')
   orders!: Order[];
 }
