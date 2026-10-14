@@ -8,8 +8,8 @@ import {
   OneToMany,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { OrderItem } from './order-item.entity';
-import { User } from './user.entity';
+import type { OrderItem } from './order-item.entity';
+import type { User } from './user.entity';
 
 export type OrderStatus = 'pending' | 'paid' | 'cancelled';
 
@@ -30,7 +30,7 @@ export class Order {
   })
   id!: string;
 
-  @ManyToOne(() => User, (user) => user.orders, {
+  @ManyToOne('User', 'orders', {
     nullable: false,
     onDelete: 'RESTRICT',
   })
@@ -46,6 +46,6 @@ export class Order {
   @Column({ type: 'timestamptz', name: 'created_at', default: () => 'now()' })
   createdAt!: Date;
 
-  @OneToMany(() => OrderItem, (item) => item.order)
+  @OneToMany('OrderItem', 'order')
   items!: OrderItem[];
 }
