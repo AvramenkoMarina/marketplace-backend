@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -36,6 +36,14 @@ docker compose exec -T postgres psql -U marketplace -d marketplace -c \
 
 `npm run migrate` розрахований на порожню БД. Якщо том уже містить схему з ДЗ #12 (`db/schema.sql`), спочатку `docker compose down -v`, потім блок вище.
 
+Демо конкурентності — після перевірки сід-каунтів: `demo:race` додає своїх покупців і замовлення, тож 8/10/8/15 знімають до нього.
+
+```bash
+npm run demo:race
+npm run demo:workers
+npm run demo:retry
+```
+
 ## TypeORM (HW-13)
 
 `src/data-source.ts`: `synchronize: false`. Схему створює згенерована міграція `src/migrations/1792004809791-InitSchema.ts` (`migration:generate`), дописана вручну: індекси `created_at DESC, id DESC`, виразний індекс `lower(name)` і GIN по `search_vector`. `down()` знімає FK, індекси і таблиці.
@@ -49,6 +57,7 @@ docker compose exec -T postgres psql -U marketplace -d marketplace -c \
 - `order_items.order_id` → **CASCADE**: позиція не існує без замовлення, діти йдуть за батьком.
 - `order_items.product_id` → **RESTRICT**: товар, який уже потрапив у замовлення, не можна стерти — у рядку лишається історична ціна, а посилання на товар захищене.
 - `orders.user_id` і `products.seller_id` → **RESTRICT**: історія замовлень і каталог продавця не зникають разом із користувачем.
+- `tasks.order_id` → **CASCADE** (колонка nullable): задача post-processing не переживає своє замовлення; воркер-демо вставляє задачі без замовлення.
 
 ### Seed
 
@@ -69,6 +78,20 @@ docker compose exec -T postgres psql -U marketplace -d marketplace -c \
 ### Repository чи QueryBuilder
 
 `Repository.find()` — коли результат є сутностями (або графом сутностей) і умову можна виразити через `where` / `relations`. `createQueryBuilder().getRawMany()` — коли потрібні агрегат, `GROUP BY` і JOIN, а рядка-entity на виході немає. Звіт `npm run report` — виторг оплачених замовлень по продавцях (`SUM(qty * unit_price_cents)`, `COUNT(DISTINCT order)`), його `find()` не виражає.
+
+## Конкурентність
+
+Checkout (`src/checkout.ts`) — одна транзакція: атомарний `UPDATE products SET stock = stock - $qty WHERE id = $id AND stock >= $qty RETURNING`, таке саме списання `balance_cents`, `INSERT` замовлення і позиції, `INSERT` задачі `order_postprocess`. Порожній `RETURNING` відкочує всю транзакцію, тож замовлення без товару чи без грошей не лишається.
+
+Замість `SELECT … FOR UPDATE` і подальшого запису в JS стоїть один `UPDATE … WHERE stock >= $n RETURNING`: перевірка і блокування рядка відбуваються в одному операторі, між ними немає вікна для другого клієнта. `FOR UPDATE` теж був би коректний, але тоді залишок треба читати і писати окремо.
+
+`npm run demo:race` — 50 паралельних checkout на товар зі `stock = 10`, по 1 штуці. Баланс кожного покупця `100000000` копійок, тож лімітує склад. Запуск: спроб **50**, успішних **10**, фінальний stock **0**, рядків із відʼємним stock **0**. Повторний запуск дав ті самі числа.
+
+`npm run demo:workers` — 4 воркери, 20 задач по 80 мс, `SELECT … FOR UPDATE SKIP LOCKED`. Порожній результат означає «зараз ніхто не вільний», воркер питає `count(pending)` і виходить лише коли черга цього kind порожня. Запуск: w1–w4 по **5** задач, оброблено двічі **0**, час **446 мс** проти послідовних **1600 мс**.
+
+`npm run demo:retry` — два конкурентні read-modify-write балансу під `REPEATABLE READ`. Другий коміт ловить `40001` (could not serialize access due to concurrent update), обгортка повторює транзакцію з початку, включно з `SELECT`. Запуск: **1** retry (`40001`, backoff 25 мс), фінальний `balance_cents` **200** при очікуваних **200**.
+
+Повторюються лише `40001` (serialization failure) і `40P01` (deadlock). Це конфлікти, які Postgres просить переграти цілком. Будь-який інший код — справжня помилка даних чи схеми, її повтор не виправить.
 
 Підняти базу: `docker compose up -d --wait`
 
