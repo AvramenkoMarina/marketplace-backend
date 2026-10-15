@@ -10,6 +10,7 @@ type UserSeed = {
   email: string;
   displayName: string;
   createdAt: string;
+  balanceCents?: number;
 };
 
 type ProductSeed = {
@@ -17,6 +18,7 @@ type ProductSeed = {
   name: string;
   description: string;
   priceCents: number;
+  stock?: number;
   createdAt: string;
 };
 
@@ -234,6 +236,7 @@ async function ensureUser(manager: EntityManager, input: UserSeed): Promise<User
     manager.create(User, {
       email: input.email,
       displayName: input.displayName,
+      balanceCents: input.balanceCents ?? 50_000_000,
       createdAt: new Date(input.createdAt),
     }),
   );
@@ -258,6 +261,7 @@ async function ensureProduct(
       name: input.name,
       description: input.description,
       priceCents: input.priceCents,
+      stock: input.stock ?? 100,
       createdAt: new Date(input.createdAt),
     }),
   );
