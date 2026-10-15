@@ -15,6 +15,7 @@ import type { User } from './user.entity';
 @Check('products_price_positive', '"price_cents" > 0')
 @Check('products_name_not_blank', 'length(btrim(name)) > 0')
 @Check('products_description_not_blank', 'length(btrim(description)) > 0')
+@Check('products_stock_non_negative', '"stock" >= 0')
 @Index('idx_products_lower_name', { synchronize: false })
 @Index('idx_products_search_vector', { synchronize: false })
 export class Product {
@@ -39,6 +40,9 @@ export class Product {
 
   @Column({ type: 'integer', name: 'price_cents' })
   priceCents!: number;
+
+  @Column({ type: 'integer', default: 0 })
+  stock!: number;
 
   @Column({ type: 'timestamptz', name: 'created_at', default: () => 'now()' })
   createdAt!: Date;
