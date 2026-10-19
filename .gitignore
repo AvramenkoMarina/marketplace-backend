@@ -13,3 +13,4 @@ coverage/
 .vscode/*
 !.vscode/settings.json
 *.tsbuildinfo
+backups/
