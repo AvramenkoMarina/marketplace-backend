@@ -1,0 +1,63 @@
+name: contract
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract:
+    name: contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Publish contract
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+        run: |
+          npm run test:contract
+          pact="pacts/MarketplaceWeb-MarketplaceAPI.json"
+          auth=()
+          if [ -n "${PACT_BROKER_TOKEN}" ]; then
+            auth=(-H "Authorization: Bearer ${PACT_BROKER_TOKEN}")
+          fi
+          code="$(curl -sS -o /tmp/pact-publish.json -w "%{http_code}" -X PUT \
+            "${PACT_BROKER_URL}/pacts/provider/MarketplaceAPI/consumer/MarketplaceWeb/version/${GITHUB_SHA}" \
+            -H "Content-Type: application/json" \
+            "${auth[@]}" \
+            --data-binary @"${pact}")"
+          echo "publish HTTP ${code}"
+          cat /tmp/pact-publish.json
+          test "${code}" = "201" -o "${code}" = "200"
+
+      - name: Verify provider
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+          PACT_PROVIDER_VERSION: ${{ github.sha }}
+        run: npm run verify:provider
+
+      - name: can-i-deploy
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+        run: |
+          auth=()
+          if [ -n "${PACT_BROKER_TOKEN}" ]; then
+            auth=(-H "Authorization: Bearer ${PACT_BROKER_TOKEN}")
+          fi
+          curl -sS "${auth[@]}" \
+            "${PACT_BROKER_URL}/can-i-deploy?pacticipant=MarketplaceWeb&version=${GITHUB_SHA}&to=prod" \
+            | tee /tmp/can-i-deploy.json
+          python3 -c 'import json,sys; body=json.load(open("/tmp/can-i-deploy.json")); summary=body.get("summary", body); raise SystemExit(0 if summary.get("deployable") is True else 1)'
