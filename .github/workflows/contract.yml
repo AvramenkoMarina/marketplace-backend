@@ -70,6 +70,7 @@ jobs:
           fi
           code="$(curl -sS -o /tmp/pact-tag.json -w "%{http_code}" -X PUT \
             "${PACT_BROKER_URL}/pacticipants/MarketplaceAPI/versions/${GITHUB_SHA}/tags/prod" \
+            -H "Content-Type: application/json" \
             "${auth[@]}")"
           echo "tag HTTP ${code}"
           cat /tmp/pact-tag.json
