@@ -21,15 +21,31 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Publish contract
+      - name: Pact Broker
         env:
           PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
           PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
         run: |
+          if [ -n "${PACT_BROKER_URL}" ]; then
+            echo "PACT_BROKER_URL=${PACT_BROKER_URL}" >> "$GITHUB_ENV"
+          else
+            docker compose up -d --wait pact-broker
+            echo "PACT_BROKER_URL=http://127.0.0.1:9292" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${PACT_BROKER_TOKEN}" ]; then
+            {
+              echo "PACT_BROKER_TOKEN<<__PACT_TOKEN__"
+              echo "${PACT_BROKER_TOKEN}"
+              echo "__PACT_TOKEN__"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish contract
+        run: |
           npm run test:contract
           pact="pacts/MarketplaceWeb-MarketplaceAPI.json"
           auth=()
-          if [ -n "${PACT_BROKER_TOKEN}" ]; then
+          if [ -n "${PACT_BROKER_TOKEN:-}" ]; then
             auth=(-H "Authorization: Bearer ${PACT_BROKER_TOKEN}")
           fi
           code="$(curl -sS -o /tmp/pact-publish.json -w "%{http_code}" -X PUT \
@@ -43,18 +59,26 @@ jobs:
 
       - name: Verify provider
         env:
-          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
-          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
           PACT_PROVIDER_VERSION: ${{ github.sha }}
         run: npm run verify:provider
 
-      - name: can-i-deploy
-        env:
-          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
-          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      - name: Tag provider prod
         run: |
           auth=()
-          if [ -n "${PACT_BROKER_TOKEN}" ]; then
+          if [ -n "${PACT_BROKER_TOKEN:-}" ]; then
+            auth=(-H "Authorization: Bearer ${PACT_BROKER_TOKEN}")
+          fi
+          code="$(curl -sS -o /tmp/pact-tag.json -w "%{http_code}" -X PUT \
+            "${PACT_BROKER_URL}/pacticipants/MarketplaceAPI/versions/${GITHUB_SHA}/tags/prod" \
+            "${auth[@]}")"
+          echo "tag HTTP ${code}"
+          cat /tmp/pact-tag.json
+          test "${code}" = "201" -o "${code}" = "200"
+
+      - name: can-i-deploy
+        run: |
+          auth=()
+          if [ -n "${PACT_BROKER_TOKEN:-}" ]; then
             auth=(-H "Authorization: Bearer ${PACT_BROKER_TOKEN}")
           fi
           curl -sS "${auth[@]}" \
