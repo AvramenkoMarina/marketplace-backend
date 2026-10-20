@@ -1,13 +1,13 @@
 {
   "name": "marketplace-api",
   "version": "1.1.0",
-  "description": "Marketplace API — TypeORM entities, migrations, and reports (HW-13)",
+  "description": "Marketplace API \u2014 TypeORM entities, migrations, and reports (HW-13)",
   "private": true,
   "scripts": {
-    "build": "nest build",
-    "start": "npm run build && node dist/main.js",
-    "start:dev": "nest start --watch",
-    "start:prod": "node dist/main.js",
+    "build": "node init && nest build",
+    "start": "node init && npm run build && node dist/main.js",
+    "start:dev": "node init && nest start --watch",
+    "start:prod": "node init && node dist/main.js",
     "migrate": "bash scripts/with-secrets.sh dev npx typeorm migration:run -d dist/data-source.js",
     "migrate:show": "bash scripts/with-secrets.sh dev npx typeorm migration:show -d dist/data-source.js",
     "migrate:revert": "bash scripts/with-secrets.sh dev npx typeorm migration:revert -d dist/data-source.js",
