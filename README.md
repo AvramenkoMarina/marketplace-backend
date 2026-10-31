@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -217,6 +217,59 @@ curl -s http://localhost:3000/health     # uptime більший за попер
 
 ```bash
 printf '%s' 'marketplace_secret' > secrets/db_password
+```
+
+## Тестування
+
+Команди з кореня, Docker має бути запущений:
+
+```bash
+npm run test:integration
+npm run test:e2e
+npm run test:contract
+npm run verify:provider
+```
+
+`test:integration` — `UserRepository` і `OrderRepository` проти `postgres:16-alpine`, який піднімає `@testcontainers/postgresql`. `test:e2e` — повний `AppModule` без підмін провайдерів: `POST /orders` → `GET /orders/:id`, і `404` на невідоме замовлення. `test:contract` пише `pacts/MarketplaceWeb-MarketplaceAPI.json` (файл у git, щоб `verify:provider` працював і без попереднього прогону; CI генерує його знову). `verify:provider` ганяє справжній застосунок проти контракту. Jest має `reporters: ['default']` і `maxWorkers: 1`.
+
+Ізоляція — транзакція і `ROLLBACK`. На сьют піднімається один контейнер, міграції проганяються один раз, а кожен тест бере `PoolClient`, робить `BEGIN` і віддає цей самий клієнт у репозиторій (йому достатньо `query()`). `afterEach` робить `ROLLBACK`, тож unique/FK і `COUNT(*)` не бачать рядків сусіднього тесту. Окремий контейнер на тест лише помножив би старт Postgres, а `TRUNCATE` комітив би зміни і ховав би пропущений rollback. Повторний `npm run test:integration && npm run test:integration` зелений без ручної чистки: другий прогін піднімає новий контейнер, а всередині прогону тести й так відкочуються.
+
+`DATABASE_URL` тестам віддає `container.getConnectionUri()`. Застосунок як і раніше читає пароль з файла (`DB_URL` без пароля + `DB_PASSWORD_FILE`), тож testkit розкладає URI контейнера в ці дві змінні. Сховище для тестів не потрібне.
+
+### Pact Broker
+
+Локально брокер — сервіс `pact-broker` у `docker-compose.yml` (SQLite, порт `9292`, healthcheck на `127.0.0.1`).
+
+```bash
+docker compose up -d --wait
+```
+
+Код читає лише `process.env.PACT_BROKER_URL` і `process.env.PACT_BROKER_TOKEN`. Основний локальний шлях — обгортка з ДЗ #11: секрети `PACT_BROKER_URL` / `PACT_BROKER_TOKEN` лежать у сховищі dev і приїжджають так:
+
+```bash
+bash scripts/with-secrets.sh dev npm run verify:provider
+```
+
+Грейдер сховища не має. `SKIP_VAULT=1` змушує обгортку виконати команду як є, з уже заданим оточенням. Те саме без обгортки:
+
+```bash
+PACT_BROKER_URL=http://127.0.0.1:9292 PACT_PROVIDER_VERSION=1.0.0 npm run verify:provider
+```
+
+Без `PACT_BROKER_URL` верифікатор бере файл `pacts/*.json` і нічого не публікує. З адресою брокера вмикається `publishVerificationResult: true`. Токен у репозиторій не кладеться; для локального compose він не потрібен. У CI ті самі змінні — секрети GitHub. Job `contract` робить publish → verify → `can-i-deploy` і падає, якщо `deployable` не `true`. Тег `prod` ставиться на версію провайдера (`PACT_PROVIDER_VERSION`), не консюмера.
+
+Гейт на локальному брокері (споживач `MarketplaceWeb` `1.0.0`, провайдер `MarketplaceAPI` `1.0.0`). Публікація `curl -X PUT` повернула **201**, верифікація з `PACT_BROKER_URL` — exit 0, тег `PUT .../versions/1.0.0/tags/prod` — **201**.
+
+`can-i-deploy` між верифікацією і тегом (`"deployable":null`, `"unknown":1`):
+
+```json
+{"summary":{"deployable":null,"reason":"There is no verified pact between version 1.0.0 of MarketplaceWeb and the latest version of MarketplaceAPI with tag prod (no such version exists)","success":0,"failed":0,"unknown":1},"notices":[{"type":"error","text":"There is no verified pact between version 1.0.0 of MarketplaceWeb and the latest version of MarketplaceAPI with tag prod (no such version exists)"}],"matrix":[{"consumer":{"name":"MarketplaceWeb","version":{"number":"1.0.0","branch":null,"branches":[],"branchVersions":[],"environments":[],"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceWeb/versions/1.0.0"}},"tags":[]},"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceWeb"}}},"provider":{"name":"MarketplaceAPI","version":null,"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI"}}},"pact":{"createdAt":"2026-10-20T15:26:58+00:00","_links":{"self":{"href":"http://127.0.0.1:9292/pacts/provider/MarketplaceAPI/consumer/MarketplaceWeb/version/1.0.0"}}},"verificationResult":null}]}
+```
+
+Та сама команда після тега `prod` (`"deployable":true`):
+
+```json
+{"summary":{"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0},"notices":[{"type":"success","text":"All required verification results are published and successful"}],"matrix":[{"consumer":{"name":"MarketplaceWeb","version":{"number":"1.0.0","branch":null,"branches":[],"branchVersions":[],"environments":[],"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceWeb/versions/1.0.0"}},"tags":[]},"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceWeb"}}},"provider":{"name":"MarketplaceAPI","version":{"number":"1.0.0","branch":"prod","branches":[{"name":"prod","latest":true,"_links":{"self":{"title":"Branch version","name":"prod","href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI/branches/prod/versions/1.0.0"}}}],"branchVersions":[{"name":"prod","latest":true,"_links":{"self":{"title":"Branch version","name":"prod","href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI/branches/prod/versions/1.0.0"}}}],"environments":[],"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI/versions/1.0.0"}},"tags":[{"name":"prod","latest":true,"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI/versions/1.0.0/tags/prod"}}}]},"_links":{"self":{"href":"http://127.0.0.1:9292/pacticipants/MarketplaceAPI"}}},"pact":{"createdAt":"2026-10-20T15:26:58+00:00","_links":{"self":{"href":"http://127.0.0.1:9292/pacts/provider/MarketplaceAPI/consumer/MarketplaceWeb/version/1.0.0"}}},"verificationResult":{"success":true,"verifiedAt":"2026-10-20T15:27:06+00:00","_links":{"self":{"href":"http://127.0.0.1:9292/pacts/provider/MarketplaceAPI/consumer/MarketplaceWeb/pact-version/11489fd506e6e4f384dfcd7f4a1aa92ae50f8926/metadata/Y3ZuPTEuMC4w/verification-results/101"}}}}]}
 ```
 
 ## Ресурси API (OpenAPI)
