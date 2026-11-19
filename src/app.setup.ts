@@ -11,7 +11,11 @@ export function configureHttpServer(server: express.Express): void {
       apiSpec: join(__dirname, '..', 'openapi', 'openapi.yaml'),
       validateRequests: true,
       validateResponses: true,
-      ignorePaths: /^(?:\/health|\/db\/ping)(?:\?|$)/,
+      // SSE is not a JSON operation: validating it would 404 the stream or
+      // buffer it until the client disconnects. socket.io is ignored for the
+      // same reason; the demo connects with the websocket transport.
+      ignorePaths:
+        /^(?:\/health|\/db\/ping|\/socket\.io(?:\/.*)?|\/orders\/[^/]+\/events)(?:\?|$)/,
     }),
   );
 }

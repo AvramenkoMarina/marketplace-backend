@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { OrderEventsService } from './order-events.service';
 import {
   bodyHash,
   paginate,
@@ -8,8 +9,11 @@ import {
   type Product,
 } from './marketplace.util';
 
+const ORDER_STATUSES: readonly Order['status'][] = ['pending', 'paid', 'cancelled'];
+
 @Injectable()
 export class MarketplaceService {
+  constructor(private readonly orderEvents: OrderEventsService) {}
   private readonly products = new Map<string, Product>([
     ['1', { id: '1', name: 'Notebook', price_cents: 129900, createdAt: '2026-01-01T10:00:01.000Z' }],
     ['2', { id: '2', name: 'USB-C Cable', price_cents: 1599, createdAt: '2026-01-01T10:00:02.000Z' }],
@@ -49,9 +53,33 @@ export class MarketplaceService {
     return publicOrder(order);
   }
 
+  isOwner(orderId: string, userId: string): boolean {
+    const order = this.orders.get(orderId);
+    return order?.userId === userId && userId.length > 0;
+  }
+
+  updateStatus(id: string, status: Order['status']) {
+    if (!ORDER_STATUSES.includes(status)) {
+      const err = new Error(
+        'status must be pending, paid, or cancelled',
+      ) as Error & { status?: number; title?: string };
+      err.status = 400;
+      err.title = 'Bad Request';
+      throw err;
+    }
+    const order = this.orders.get(id);
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    order.status = status;
+    this.orderEvents.publish(order.id, order.status);
+    return publicOrder(order);
+  }
+
   createOrder(
     key: string,
     body: { items: { product_id: string; qty: number }[] },
+    userId: string | null = null,
   ): {
     status: number;
     headers: Record<string, string>;
@@ -104,6 +132,7 @@ export class MarketplaceService {
       total_cents,
       status: 'pending',
       createdAt: new Date().toISOString(),
+      userId,
     };
     this.orders.set(id, order);
 
