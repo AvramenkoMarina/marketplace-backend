@@ -9,6 +9,7 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import type { OrderItem } from './order-item.entity';
+import type { Task } from './task.entity';
 import type { User } from './user.entity';
 
 export type OrderStatus = 'pending' | 'paid' | 'cancelled';
@@ -48,4 +49,7 @@ export class Order {
 
   @OneToMany('OrderItem', 'order')
   items!: OrderItem[];
+
+  @OneToMany('Task', 'order')
+  tasks!: Task[];
 }

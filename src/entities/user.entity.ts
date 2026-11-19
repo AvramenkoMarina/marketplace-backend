@@ -13,6 +13,7 @@ import type { Product } from './product.entity';
 @Unique('users_email_unique', ['email'])
 @Check('users_email_not_blank', 'length(btrim(email)) > 0')
 @Check('users_display_name_not_blank', 'length(btrim(display_name)) > 0')
+@Check('users_balance_non_negative', '"balance_cents" >= 0')
 export class User {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -25,6 +26,9 @@ export class User {
 
   @Column({ type: 'text', name: 'display_name' })
   displayName!: string;
+
+  @Column({ type: 'integer', name: 'balance_cents', default: 0 })
+  balanceCents!: number;
 
   @Column({ type: 'timestamptz', name: 'created_at', default: () => 'now()' })
   createdAt!: Date;
