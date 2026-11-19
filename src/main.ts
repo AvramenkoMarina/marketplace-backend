@@ -1,31 +1,21 @@
 import 'reflect-metadata';
-import { join } from 'node:path';
-import express from 'express';
 import { NestFactory } from '@nestjs/core';
 import { ExpressAdapter } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
-import * as OpenApiValidator from 'express-openapi-validator';
+import express from 'express';
 import { AppModule } from './app.module';
-import { ProblemJsonFilter } from './common/problem-json.filter';
+import { configureHttpServer, configureNestApp } from './app.setup';
 import type { Env } from './config/env.schema';
 
 async function bootstrap() {
   const server = express();
-  server.use(express.json({ strict: true }));
-  server.use(
-    OpenApiValidator.middleware({
-      apiSpec: join(__dirname, '..', 'openapi', 'openapi.yaml'),
-      validateRequests: true,
-      validateResponses: true,
-      ignorePaths: /^(?:\/health|\/db\/ping)(?:\?|$)/,
-    }),
-  );
+  configureHttpServer(server);
 
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server), {
     bodyParser: false,
     abortOnError: false,
   });
-  app.useGlobalFilters(new ProblemJsonFilter());
+  configureNestApp(app);
 
   const config = app.get(ConfigService<Env, true>);
   const port = config.get('PORT', { infer: true });
