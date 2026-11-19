@@ -7,6 +7,7 @@ spec.json
 .env.*
 !.env.example
 secrets/
+.secrets/
 coverage/
 .idea/
 .vscode/*
