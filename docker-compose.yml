@@ -34,5 +34,26 @@ services:
       timeout: 3s
       retries: 20
 
+  pact-broker:
+    image: pactfoundation/pact-broker:2.143.0-pactbroker2.121.0
+    container_name: marketplace-pact-broker
+    ports:
+      - '9292:9292'
+    environment:
+      PACT_BROKER_DATABASE_ADAPTER: sqlite
+      PACT_BROKER_DATABASE_NAME: /tmp/pact_broker.sqlite3
+      PACT_BROKER_BASE_URL: http://127.0.0.1:9292
+      PACT_BROKER_LOG_LEVEL: INFO
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'ruby -rnet/http -e ''res=Net::HTTP.get_response(URI("http://127.0.0.1:9292/diagnostic/status/heartbeat")); abort unless res.is_a?(Net::HTTPSuccess)''',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
 volumes:
   marketplace_pg:
