@@ -1,19 +1,25 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
 ## Grading
 
-Свіжий клон, чиста БД. Дев-креденшели збігаються з `docker-compose.yml` (порт хоста `5433`). `SKIP_VAULT=1` — у грейдера немає доступу до сховища, значення `DB_*` уже в оточенні.
+Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*` і `DATABASE_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
 
 ```bash
 docker compose up -d --wait
 
-export DB_HOST=127.0.0.1 DB_PORT=5433 DB_USER=marketplace DB_PASSWORD=marketplace_secret DB_NAME=marketplace
+export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=marketplace_secret DB_NAME=marketplace
+
+export DATABASE_URL=postgres://marketplace:marketplace_secret@127.0.0.1:6432/marketplace
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
+
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 
 npm ci
 npx tsc --noEmit
@@ -93,11 +99,19 @@ Checkout (`src/checkout.ts`) — одна транзакція: атомарни
 
 Повторюються лише `40001` (serialization failure) і `40P01` (deadlock). Це конфлікти, які Postgres просить переграти цілком. Будь-який інший код — справжня помилка даних чи схеми, її повтор не виправить.
 
+## Data layer ops
+
+`docker compose up -d --wait` піднімає Postgres і PgBouncer. Застосунок (`DB_URL` у `.env.example` і в сховищі dev/prod) ходить на порт **6432** — це PgBouncer, не Postgres. Пароль як і раніше в `secrets/db_password`, нового секрета немає: у сховищі змінюється лише хост/порт рядка підключення. Пряме підключення до Postgres лишається на порту хоста `5433` (`docker compose exec -T postgres psql -U marketplace -d marketplace`).
+
+Бекап: `bash scripts/with-secrets.sh dev bash scripts/backup.sh`. Скрипт робить `pg_dump -Fc` і друкує шлях до `backups/marketplace-<дата>.dump`. Розклад — `backup.cron`, щоночі о 03:00. Відновлення: `bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh` піднімає порожній контейнер з новим volume, робить `pg_restore --no-owner` і друкує `MATCH`, якщо `count` і сума по `orders` збіглися. Протокол прогону: `RESTORE-DRILL.md`.
+
+`pool_mode = transaction`, бо серверне зʼєднання зайняте лише на час транзакції: `default_pool_size = 8` обслуговує до `max_client_conn = 200`. Session mode тримав би бекенд на весь час клієнтського конекта, і пул з 8 вичерпався б уже на гонці checkout. Transaction mode ламає стан сесії між транзакціями: іменовані prepared statements (їх тримає `max_prepared_statements = 200`), session-level advisory locks (`pg_advisory_lock`, на відміну від `pg_advisory_xact_lock`) і `LISTEN`/`NOTIFY`. Тимчасові таблиці та `SET` без `LOCAL` теж не переживають повернення зʼєднання в пул.
+
 Підняти базу: `docker compose up -d --wait`
 
 Підключитись: `docker compose exec -T postgres psql -U marketplace -d marketplace`
 
-Дев-креденшели стенда лежать у `docker-compose.yml` (`marketplace` / `marketplace_secret`, БД `marketplace`, порт хоста `5433`). Свіжий клон піднімає Postgres без правок файлів. Пароль застосунку — окремо, зі сховища `secrets/db_password` (див. Configuration).
+Дев-креденшели стенда лежать у `docker-compose.yml` (`marketplace` / `marketplace_secret`, БД `marketplace`). Застосунок — порт хоста `6432` (PgBouncer), прямий Postgres — `5433`. Свіжий клон піднімає обидва сервіси без правок файлів. Пароль застосунку — окремо, зі сховища `secrets/db_password` (див. Configuration).
 
 ## Дата-шар (HW-12)
 
@@ -137,7 +151,7 @@ API: `http://localhost:3000`
 |--------|-------------|----------|------|
 | `NODE_ENV` | ні (default `development`) | процес / `.env` | `development` \| `test` \| `production` |
 | `PORT` | ні (default `3000`) | процес / `.env` | HTTP-порт (`z.coerce.number`) |
-| `DB_URL` | так | сховище | Postgres URL **без пароля**, напр. `postgresql://marketplace@localhost:5433/marketplace` |
+| `DB_URL` | так | сховище | URL **без пароля** через PgBouncer, напр. `postgresql://marketplace@localhost:6432/marketplace` |
 | `DB_PASSWORD_FILE` | так | сховище | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
