@@ -133,6 +133,17 @@ paths:
             type: string
             minLength: 1
             maxLength: 128
+        - name: X-User-Id
+          in: header
+          required: false
+          description: >
+            Ідентифікатор покупця. Той самий рядок клієнт передає в
+            handshake.auth.userId під час WebSocket join. Без заголовка
+            замовлення анонімне: join у його кімнату відхиляється.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
       requestBody:
         required: true
         content:
@@ -189,6 +200,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
+        '404':
+          description: Замовлення не знайдено
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+    patch:
+      operationId: updateOrderStatus
+      tags: [orders]
+      summary: Змінити статус замовлення
+      description: >
+        Оновлює статус. Публікація події order.status живе в сервісі:
+        WebSocket-кімната orders:{id} і SSE-потік цього замовлення.
+        Кожен успішний виклик дає нову подію, навіть якщо значення статусу те саме.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatus'
+      responses:
+        '200':
+          description: Статус оновлено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          description: Невалідний статус
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '404':
           description: Замовлення не знайдено
           content:
@@ -294,6 +341,15 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/CreateOrderItem'
+
+    UpdateOrderStatus:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [pending, paid, cancelled]
 
     Order:
       type: object

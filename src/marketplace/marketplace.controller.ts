@@ -46,14 +46,20 @@ export class MarketplaceController {
   @Post('orders')
   createOrder(
     @Headers('idempotency-key') key: string,
+    @Headers('x-user-id') userId: string | string[] | undefined,
     @Body() body: { items: { product_id: string; qty: number }[] },
     @Res({ passthrough: false }) res: Response,
   ) {
     // Header required перевіряє express-openapi-validator; тут ключ уже є.
-    const result = this.marketplace.createOrder(key, body);
+    const result = this.marketplace.createOrder(key, body, ownerFromHeader(userId));
     for (const [name, value] of Object.entries(result.headers)) {
       res.setHeader(name, value);
     }
     return res.status(result.status).json(result.body);
   }
+}
+
+function ownerFromHeader(value: string | string[] | undefined): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw && raw.length > 0 ? raw : null;
 }
