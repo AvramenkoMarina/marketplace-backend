@@ -34,6 +34,24 @@ services:
       timeout: 3s
       retries: 20
 
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    container_name: marketplace-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+      - marketplace_rabbit:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
   pact-broker:
     image: pactfoundation/pact-broker:2.143.0-pactbroker2.121.0
     container_name: marketplace-pact-broker
@@ -57,3 +75,4 @@ services:
 
 volumes:
   marketplace_pg:
+  marketplace_rabbit:
