@@ -16,6 +16,14 @@ export const envSchema = z.object({
     ),
 
   DB_PASSWORD_FILE: z.string().min(1, 'DB_PASSWORD_FILE is required'),
+
+  BROKER_URL: z
+    .string()
+    .refine(
+      (value) => value.startsWith('amqp://') || value.startsWith('amqps://'),
+      'BROKER_URL must start with amqp:// or amqps://',
+    )
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

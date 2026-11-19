@@ -1,12 +1,12 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
 ## Grading
 
-Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*` і `DATABASE_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
+Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. RabbitMQ — образ `rabbitmq:4.2-management`, AMQP на порту хоста `5672` (не `15672`: там лише вебморда). Здоровʼя брокера в compose — `rabbitmq-diagnostics -q check_running`, бо між відкритим TCP-портом і готовим `basic.publish` є вікно `ECONNRESET`. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*`, `DATABASE_URL` і `BROKER_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
 
 ```bash
 docker compose up -d --wait
@@ -14,6 +14,8 @@ docker compose up -d --wait
 export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=marketplace_secret DB_NAME=marketplace
 
 export DATABASE_URL=postgres://marketplace:marketplace_secret@127.0.0.1:6432/marketplace
+
+export BROKER_URL=amqp://app:app@127.0.0.1:5672
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 
@@ -48,6 +50,9 @@ docker compose exec -T postgres psql -U marketplace -d marketplace -c \
 npm run demo:race
 npm run demo:workers
 npm run demo:retry
+npm run demo:publish
+npm run demo:dlq
+npm run demo:duplicate
 ```
 
 ## TypeORM (HW-13)
@@ -199,6 +204,55 @@ curl -sN --max-time 2 -H 'Last-Event-ID: 3' "http://localhost:3000/orders/${ID}/
 | Вимоги до інфраструктури | HTTP Upgrade, довге з’єднання, sticky-сесія або спільний адаптер кімнат | Звичайний HTTP; проксі не має буферизувати `text/event-stream` |
 | Ціна на подію | Після рукостискання кадр маленький, але конект і heartbeat висять навіть без подій | Текст у вже відкритій відповіді; дешевше за polling, без окремого протоколу |
 
+## Async-події через RabbitMQ
+
+Realtime з ДЗ #18 віддає статус тому, хто підключений зараз. `order.placed` іде іншим каналом: брокер тримає повідомлення, поки зʼявиться споживач. Продюсер — `checkout` після коміту продажу. У тілі — контракт `eventId`, `type`, `occurredAt`, `data`. `eventId` стабільний: `order.placed:<id замовлення>`, за ним споживач впізнає дубль.
+
+Топологію оголошує споживач і бутстрап демо, не продюсер. Topic-exchange `shop.events`, quorum-черга `shop.order.placed` з binding на `order.placed`, DLX `shop.events.dlx` і окрема черга `shop.order.placed.dlq` (`x-dead-letter-exchange` на робочій черзі). На exchange висить `alternate-exchange`: routing key без binding інакше зникає мовчки, а confirm продюсер все одно отримує. Публікація — `createConfirmChannel`, `waitForConfirms` і `mandatory: true`.
+
+Споживач працює з `noAck: false` і робить `ack` лише після ефекту. Ефект — один `INSERT` у `order_placed_effects` з `ON CONFLICT (event_id) DO NOTHING`. Це ідемпотентна операція за природним ключем, не `qty = qty - 1` і не `Set` у памʼяті процесу: рядок переживає рестарт споживача. Ключ ідемпотентності тут не потрібен — повтор із тим самим `eventId` сам нічого не змінює.
+
+prefetch=20, бо ефект — один INSERT: пʼять підтверджених публікацій до останнього ack зайняли 15 мс (близько 3 мс на подію), тож 20 × 3 мс = 60 мс, і це менше за стоковий consumer_timeout у 30 хвилин.
+
+Отруєне тіло, яке не є контрактом `order.placed`, споживач відхиляє через `channel.reject(msg, false)`. Повідомлення йде в DLQ, а `x-first-death-reason` дорівнює `rejected`. На RabbitMQ 4.3 `reject` із `requeue=true` довів би quorum-повідомлення до `delivery_limit`, а `nack` із `requeue=true` лічильник не збільшує; для цього демо достатньо одного reject без повернення в чергу. Політику `dead-letter-strategy: at-least-once` без `overflow: reject-publish` брокер мовчки відкочує на at-most-once і пише про це лише в лог — лишив дефолт, його вистачає, щоб `rejected` зʼявився в окремій черзі.
+
+Повторну доставку в `demo:duplicate` зроблено так: окремий процес застосовує ефект і не шле ack, батько посилає йому `SIGKILL`. Процес зникає, ОС закриває сокет, брокер повертає непідтверджене. Другий споживач бачить той самий `eventId`, вставка конфліктує, ефект лишається один. `channel.close()` для цього не брав: це коректне закриття, а падіння сервісу виглядає як зниклий процес.
+
+Це at-least-once доставка, не exactly-once. Підтвердження брокера означає «я більше не вимагаю повтору», а не «ефект стався рівно один раз». Якщо процес гине після ефекту і до ack, те саме повідомлення приїде знову — `demo:duplicate` це й показує. Exactly-once доставки немає ні в кого. Результат один, бо до at-least-once додано ідемпотентний ефект: повтор не вставляє другий рядок.
+
+Щілина між позначкою «вже оброблено» і окремим ефектом лишається, якщо комітити їх двома транзакціями. Тут позначка і є ефектом — один `INSERT` в одному коміті. Спільного COMMIT бази й брокера все одно немає: `checkout` публікує вже після коміту продажу, тож краш у цьому вікні губить подію. Це закриє transactional outbox у ДЗ #22.
+
+Брокер — RabbitMQ 4.2.9, образ `rabbitmq:4.2-management`. Серія 4.2 — LTS до 30.06.2030. Черги quorum: у них працює delivery-limit, а класичне дзеркалювання (`ha-mode`) з 4.0 прибране.
+
+Прогін `demo:publish`:
+
+```
+published=5
+delivered=5
+effect=5
+acked=5
+dlq=0
+prefetch=20
+```
+
+Прогін `demo:dlq`:
+
+```
+rejected=1
+work=0
+dlq=1
+dlq-reason=rejected
+effect=0
+```
+
+Прогін `demo:duplicate`:
+
+```
+deliveries=2
+effect=1
+skipped=1
+```
+
 ## Configuration
 
 Усі змінні описані в `src/config/env.schema.ts` (zod) і проходять
@@ -211,6 +265,7 @@ curl -sN --max-time 2 -H 'Last-Event-ID: 3' "http://localhost:3000/orders/${ID}/
 | `PORT` | ні (default `3000`) | процес / `.env` | HTTP-порт (`z.coerce.number`) |
 | `DB_URL` | так | сховище | URL **без пароля** через PgBouncer, напр. `postgresql://marketplace@localhost:6432/marketplace` |
 | `DB_PASSWORD_FILE` | так | сховище | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
+| `BROKER_URL` | ні | сховище | AMQP URL RabbitMQ, напр. `amqp://app:app@127.0.0.1:5672`. Порт `5672`, не `15672` |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 
