@@ -1,0 +1,14 @@
+node_modules/
+dist/
+spec.json
+.DS_Store
+*.log
+!.env.example
+secrets/
+.secrets/
+coverage/
+.idea/
+!.vscode/settings.json
+*.tsbuildinfo
+backups/
+config.bat
