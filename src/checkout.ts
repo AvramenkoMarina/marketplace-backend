@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { orderPlacedEvent, publishOrderPlaced } from './broker/order-placed';
 import { queryRows } from './query-rows';
 
 export class CheckoutRejected extends Error {
@@ -26,7 +27,7 @@ export async function checkout(
     throw new Error('qty must be positive');
   }
 
-  return dataSource.transaction(async (manager) => {
+  const event = await dataSource.transaction(async (manager) => {
     const stockRows = queryRows<{ id: string; price_cents: number }>(
       await manager.query(
         `UPDATE products
@@ -78,6 +79,25 @@ export async function checkout(
       [orderId],
     );
 
-    return { orderId };
+    return orderPlacedEvent({
+      eventId: `order.placed:${orderId}`,
+      orderId,
+      buyerId: input.buyerId,
+      productId: input.productId,
+      qty: input.qty,
+      totalCents: total,
+    });
   });
+
+  // The sale is already committed. A missed confirm is the outbox gap, not a second charge.
+  if (process.env.BROKER_URL) {
+    try {
+      await publishOrderPlaced(event);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`order.placed confirm failed for ${event.eventId}: ${message}`);
+    }
+  }
+
+  return { orderId: event.data.orderId };
 }
