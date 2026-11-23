@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,7 @@ import { Order } from '../../../src/entities/order.entity';
 import { Product } from '../../../src/entities/product.entity';
 import { Task } from '../../../src/entities/task.entity';
 import { User } from '../../../src/entities/user.entity';
+import { AddAuthSessions1792400000000 } from '../../../src/migrations/1792400000000-AddAuthSessions';
 import { AddStockBalanceAndTasks1792100000000 } from '../../../src/migrations/1792100000000-AddStockBalanceAndTasks';
 import { InitSchema1792004809791 } from '../../../src/migrations/1792004809791-InitSchema';
 
@@ -55,6 +57,7 @@ async function connectMigrated(
     migrations: [
       InitSchema1792004809791,
       AddStockBalanceAndTasks1792100000000,
+      AddAuthSessions1792400000000,
     ],
   });
   await dataSource.initialize();
@@ -88,4 +91,15 @@ export function applyAppDatabaseEnv(db: RunningPostgres): void {
   process.env.DATABASE_URL = db.connectionUri;
   process.env.DB_URL = `postgresql://${encodeURIComponent(user)}@${host}:${port}/${database}`;
   process.env.DB_PASSWORD_FILE = db.passwordFile;
+  if (!process.env.JWT_PRIVATE_KEY || !process.env.JWT_PUBLIC_KEY) {
+    const pair = generateKeyPairSync('ec', {
+      namedCurve: 'P-256',
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+    process.env.JWT_PRIVATE_KEY = Buffer.from(pair.privateKey).toString('base64');
+    process.env.JWT_PUBLIC_KEY = Buffer.from(pair.publicKey).toString('base64');
+  }
+  process.env.JWT_KID ??= 'test';
+  process.env.REFRESH_TOKEN_PEPPER ??= 'test-refresh-pepper';
 }

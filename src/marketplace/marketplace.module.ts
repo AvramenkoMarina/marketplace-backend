@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { AccountController } from '../auth/account.controller';
+import { AuthModule } from '../auth/auth.module';
 import { MarketplaceController } from './marketplace.controller';
 import { MarketplaceService } from './marketplace.service';
 import { OrderEventsService } from './order-events.service';
@@ -7,7 +9,8 @@ import { OrdersController } from './orders.controller';
 import { OrdersGateway } from './orders.gateway';
 
 @Module({
-  controllers: [MarketplaceController, OrdersController],
+  imports: [AuthModule],
+  controllers: [MarketplaceController, OrdersController, AccountController],
   providers: [
     MarketplaceService,
     OrderEventsService,

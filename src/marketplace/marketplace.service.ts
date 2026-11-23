@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { OrderEventsService } from './order-events.service';
 import {
   bodyHash,
@@ -56,6 +61,62 @@ export class MarketplaceService {
   isOwner(orderId: string, userId: string): boolean {
     const order = this.orders.get(orderId);
     return order?.userId === userId && userId.length > 0;
+  }
+
+  createOwnedOrder(userId: string) {
+    const id = String(this.nextOrderId++);
+    const order: Order = {
+      id,
+      items: [{ product_id: '1', qty: 1, unit_price_cents: 100 }],
+      total_cents: 100,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      userId,
+    };
+    this.orders.set(id, order);
+    return publicOrder(order);
+  }
+
+  getOwnedOrder(id: string, userId: string) {
+    const order = this.orders.get(id);
+    if (!order) {
+      throw new NotFoundException(`Order ${id} not found`);
+    }
+    if (order.userId !== userId) {
+      throw new ForbiddenException();
+    }
+    return publicOrder(order);
+  }
+
+  createPrivilegedProduct(input: { name: unknown; priceCents: unknown }) {
+    const name = typeof input.name === 'string' ? input.name.trim() : '';
+    const priceCents = input.priceCents;
+    if (
+      name.length === 0 ||
+      typeof priceCents !== 'number' ||
+      !Number.isInteger(priceCents) ||
+      priceCents <= 0
+    ) {
+      throw new BadRequestException('name and a positive integer price_cents are required');
+    }
+    const id = this.nextProductId();
+    const product: Product = {
+      id,
+      name,
+      price_cents: priceCents,
+      createdAt: new Date().toISOString(),
+    };
+    this.products.set(id, product);
+    return publicProduct(product);
+  }
+
+  private nextProductId(): string {
+    let max = 0;
+    for (const id of this.products.keys()) {
+      const parsed = Number(id);
+      if (Number.isInteger(parsed) && parsed > max) max = parsed;
+    }
+    return String(max + 1);
   }
 
   updateStatus(id: string, status: Order['status']) {
