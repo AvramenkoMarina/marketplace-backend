@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -22,6 +22,30 @@ export REDIS_URL=redis://127.0.0.1:16379
 export REDIS_QUEUE_URL=redis://127.0.0.1:16380
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
+
+export DB_URL=postgresql://marketplace@127.0.0.1:6432/marketplace
+
+printf '%s' 'marketplace_secret' > /tmp/marketplace_db_password
+
+export DB_PASSWORD_FILE=/tmp/marketplace_db_password
+
+# одноразова пара ES256 для прогону; PEM у base64, щоб багаторядковість не поїхала
+
+node -e 'const {generateKeyPairSync}=require("node:crypto");
+const k=generateKeyPairSync("ec",{namedCurve:"P-256",
+  privateKeyEncoding:{type:"pkcs8",format:"pem"},
+  publicKeyEncoding:{type:"spki",format:"pem"}});
+const fs=require("node:fs");
+fs.writeFileSync("/tmp/priv.b64",Buffer.from(k.privateKey).toString("base64"));
+fs.writeFileSync("/tmp/pub.b64",Buffer.from(k.publicKey).toString("base64"));'
+
+export JWT_KID=grader
+
+export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
+
+export JWT_PUBLIC_KEY="$(cat /tmp/pub.b64)"
+
+export REFRESH_TOKEN_PEPPER=grader-pepper
 
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 
@@ -64,6 +88,9 @@ npm run demo:cache
 npm run demo:session
 npm run demo:ratelimit
 npm run demo:queue
+npm run demo:auth
+npm run demo:reuse
+npm run demo:rbac
 ```
 
 ## TypeORM (HW-13)
@@ -152,8 +179,10 @@ mkdir -p secrets
 printf '%s' 'marketplace_secret' > secrets/db_password   # має збігатися з compose/init
 
 npm install
-npm start
+npm run start:vault
 ```
+
+Голий `npm start` навмисно падає з exit ≠ 0, якщо в оточенні немає ключа зі сховища, і називає змінну (`JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, `JWT_KID` або `REFRESH_TOKEN_PEPPER`). Дефолта у схемі немає.
 
 API: `http://localhost:3000`
 
@@ -386,6 +415,45 @@ scheduled-runs=2
 
 Якщо stampede-лок зламається, два запити одночасно підуть у базу і прочитають картку двічі. Це прийнятно: лок тут оптимізація, а не захист інваріанта. Зіпсувати залишок або баланс він не може — їх рухає транзакція checkout. Найгірша ціна збою лока — зайвий SELECT і кілька центів, не подвійний продаж.
 
+## Auth
+
+Access-токен — JWT ES256 на 10 хвилин. Refresh — випадковий рядок на 30 днів; у `refresh_tokens` лежить лише HMAC-SHA256 від нього з перцем `REFRESH_TOKEN_PEPPER`, не сам токен. Успішний refresh виписує нову пару і ставить `used_at` на старий рядок. Усі refresh одного логіна мають спільний `family_id`. Повторне предʼявлення вже використаного refresh — сигнал компрометації (RFC 9700 §4.14.2): у тій самій транзакції `revoked_at` ставиться на всю сімʼю, у лог іде `family_id` і відбиток ключа, не токен. Вікна благодаті немає: щоб віддати ту саму нову пару вдруге, довелося б зберігати наступний refresh відкритим текстом. Клієнт серіалізує refresh — один запит у польоті.
+
+Підпис — ES256 (ECDSA P-256), не RS256. OWASP позначає RS256 як Not recommended і радить ES256, PS256 або EdDSA. ES256 коротший, його підписує `node:crypto`, і верифікатор тримає явний allowlist `algorithms: ['ES256']` (RFC 8725 §3.1). Це відсікає algorithm confusion, включно з `alg: none` і підміною на HMAC. Спільного секрета HS256 немає, тож верифікатор не може виписати собі `role: admin`: у нього лише публічний ключ. PEM у змінних — один рядок base64.
+
+Ротація ключа — overlap по `kid`. Підпис завжди йде поточним приватним ключем. Перевірка тримає мапу публічних ключів: поточний `JWT_KID` і, на час overlap, `JWT_PREVIOUS_KID` + `JWT_PREVIOUS_PUBLIC_KEY`. Спершу поруч зі старим зʼявляється новий публічний ключ, потім підпис перемикається на новий `kid`, і лише після того, як access-токени старого `kid` дожили до `exp` (не довше 10 хв), старий публічний ключ прибирається. Приватний ключ попереднього покоління застосунку не потрібен.
+
+Логаут — це дві дії, бо токени різні за природою. Refresh — рядок у базі: досить `revoked_at` на сімʼю. Access самодостатній і живе до `exp`, тому його `jti` пишеться в `access_denylist` з `expires_at`, рівним `exp`. Обидва записи — один `COMMIT` у Postgres. Денилист не в Redis: інакше це був би dual write з ДЗ #22, і збій між сховищами лишив би access живим після логауту. Перевірка дивиться лише рядки з `expires_at > now()` і видаляє прострочені, тож запис не діє довше за життя токена і таблиця не росте безстроково.
+
+Немає, протух, зіпсований або відкликаний токен — 401. Токен валідний, але прав немає — 403. Клієнт на 401 іде рефрешити, на 403 показує помилку.
+
+Роль у access-токені — знімок `users.role` на момент випуску пари. `RolesGuard` читає лише токен і в базу за роллю не ходить. Розжалуваний адмін лишається адміном до `exp` цього access-токена. Наступний refresh уже візьме роль з бази. Це компроміс короткого TTL, не джерело правди.
+
+Межа власності і ролі різна. `AuthGuard` і `RolesGuard` стоять до хендлера і бачать лише токен: чи є підпис, і чи роль `seller` або `admin` на `POST /account/products`. Замовлення в гарді немає, тож власність туди не кладеться — гард мусив би сам читати базу, а хендлер прочитав би її вдруге. `GET /account/orders/:id` спочатку вантажить замовлення в `MarketplaceService.getOwnedOrder` і вже там порівнює `order.userId` із `sub`. Свій id — 200, чужий під валідним токеном — 403. Ресурс із власником — замовлення (`/account/orders/{id}`). Запис лише для продавця або адміна — товар (`POST /account/products`). Публічні `POST /orders` і `GET /orders/{id}` лишились для контракту HW-09, realtime і e2e; грейдер читає статуси з демо, не з цих маршрутів.
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів, ES256 PKCS8 PEM у base64 |
+| `JWT_PUBLIC_KEY` | сховище (#11) | перевірка підпису, ES256 SPKI PEM у base64 |
+| `JWT_KID` | сховище (#11) | `kid` поточного ключа; у dev і prod різний |
+| `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-перець хеша refresh-токена |
+| `JWT_PREVIOUS_KID` | сховище (#11), лише на час overlap | `kid` попереднього публічного ключа |
+| `JWT_PREVIOUS_PUBLIC_KEY` | сховище (#11), лише на час overlap | публічний ключ, яким ще перевіряються старі access |
+| `DB_URL` | сховище (#11) | URL Postgres без пароля |
+| `DB_PASSWORD_FILE` | сховище (#11) | файл із паролем БД |
+| `DATABASE_URL` | compose / оточення | дев-креденшели для міграцій і демо, секретом не є |
+
+Відбитки публічних ключів (SHA-256 від SPKI DER). Dev і prod — різні пари:
+
+| Оточення | kid | відбиток |
+|---|---|---|
+| dev | `marketplace-dev-es256` | `a8bb371fb7a1855c4e3efb02f710a34e4668071ed78b2f656f55344ebac490ec` |
+| prod | `marketplace-prod-es256` | `951091d526b6048a7af78ec4b0e213eb1c4da1fa5e322736491880b3ec701ea7` |
+
+```bash
+node -e 'const {createPublicKey,createHash}=require("node:crypto"); const pem=Buffer.from(process.env.JWT_PUBLIC_KEY,"base64"); const der=createPublicKey(pem).export({type:"spki",format:"der"}); console.log(createHash("sha256").update(der).digest("hex"))'
+```
+
 ## Configuration
 
 Усі змінні описані в `src/config/env.schema.ts` (zod) і проходять
@@ -401,6 +469,12 @@ scheduled-runs=2
 | `BROKER_URL` | ні | сховище | AMQP URL RabbitMQ, напр. `amqp://app:app@127.0.0.1:5672`. Порт `5672`, не `15672` |
 | `REDIS_URL` | ні | сховище | Кеш Redis, `allkeys-lru`, напр. `redis://127.0.0.1:16379` |
 | `REDIS_QUEUE_URL` | ні | сховище | Черга Redis, `noeviction`. Сесії і ліміт теж тут, напр. `redis://127.0.0.1:16380` |
+| `JWT_KID` | так | сховище | Ідентифікатор поточного ключа підпису ES256 |
+| `JWT_PRIVATE_KEY` | так | сховище | Приватний ключ ES256, PKCS8 PEM у base64. Дефолта немає |
+| `JWT_PUBLIC_KEY` | так | сховище | Публічний ключ ES256, SPKI PEM у base64. Дефолта немає |
+| `JWT_PREVIOUS_KID` | ні | сховище | Попередній `kid` на час overlap-ротації |
+| `JWT_PREVIOUS_PUBLIC_KEY` | ні | сховище | Попередній публічний ключ ES256, base64 PEM |
+| `REFRESH_TOKEN_PEPPER` | так | сховище | HMAC-перець хеша refresh-токена. Дефолта немає |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 
@@ -531,6 +605,13 @@ PACT_BROKER_URL=http://127.0.0.1:9292 PACT_PROVIDER_VERSION=1.0.0 npm run verify
 | `GET` | `/orders/{id}` | |
 | `PATCH` | `/orders/{id}` | зміна статусу, подія `order.status` |
 | `GET` | `/orders/{id}/events` | SSE `text/event-stream` |
+| `POST` | `/auth/login` | пара access + refresh |
+| `POST` | `/auth/refresh` | ротація; повтор уже використаного refresh відкликає сімʼю |
+| `POST` | `/auth/logout` | `revoked_at` сімʼї і `jti` у денилист, 204 |
+| `GET` | `/auth/me` | 200 з токеном, 401 без нього або після логауту |
+| `POST` | `/account/orders` | замовлення власника з `sub` токена |
+| `GET` | `/account/orders/{id}` | 200 власнику, 403 чужому валідному токену, 401 без токена |
+| `POST` | `/account/products` | 201 продавцю або адміну, 403 покупцю |
 | `GET` | `/health` | uptime (сек) |
 | `GET` | `/db/ping` | `SELECT 1` |
 
