@@ -52,6 +52,46 @@ services:
       retries: 20
       start_period: 30s
 
+  redis-cache:
+    image: redis:7.4-alpine
+    container_name: marketplace-redis-cache
+    command:
+      - redis-server
+      - --maxmemory
+      - 32mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+    ports:
+      - '16379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis-queue:
+    image: redis:7.4-alpine
+    container_name: marketplace-redis-queue
+    command:
+      - redis-server
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - yes
+      - --appendfsync
+      - everysec
+    ports:
+      - '16380:6379'
+    volumes:
+      - marketplace_redis_queue:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   pact-broker:
     image: pactfoundation/pact-broker:2.143.0-pactbroker2.121.0
     container_name: marketplace-pact-broker
@@ -76,3 +116,4 @@ services:
 volumes:
   marketplace_pg:
   marketplace_rabbit:
+  marketplace_redis_queue:
