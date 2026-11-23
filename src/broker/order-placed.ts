@@ -18,6 +18,28 @@ export type OrderPlacedEvent = {
   data: OrderPlacedData;
 };
 
+export type OrderPlacedSource = {
+  id: string;
+  buyerId: string;
+  productId: string;
+  qty: number;
+  totalCents: number;
+  occurredAt?: string;
+};
+
+/** Public contract for one placed order. Callers pass fields, not an ORM entity. */
+export function toOrderPlacedEvent(order: OrderPlacedSource): OrderPlacedEvent {
+  return orderPlacedEvent({
+    eventId: `order.placed:${order.id}`,
+    occurredAt: order.occurredAt,
+    orderId: order.id,
+    buyerId: order.buyerId,
+    productId: order.productId,
+    qty: order.qty,
+    totalCents: order.totalCents,
+  });
+}
+
 export function orderPlacedEvent(input: {
   eventId: string;
   occurredAt?: string;

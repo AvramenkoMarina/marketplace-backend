@@ -1,5 +1,5 @@
 import { DataSource } from 'typeorm';
-import { orderPlacedEvent, publishOrderPlaced } from './broker/order-placed';
+import { toOrderPlacedEvent } from './broker/order-placed';
 import { queryRows } from './query-rows';
 
 export class CheckoutRejected extends Error {
@@ -9,25 +9,56 @@ export class CheckoutRejected extends Error {
   }
 }
 
+/** Thrown inside the sale transaction, after the outbox insert, so both rows roll back. */
+export class CheckoutWriteFailed extends Error {
+  constructor() {
+    super('checkout crashed after the outbox insert');
+    this.name = 'CheckoutWriteFailed';
+  }
+}
+
 export type CheckoutInput = {
   buyerId: string;
   productId: string;
   qty: number;
+  /** Client Idempotency-Key. Names the intent, not a hash of the body. */
+  idempotencyKey?: string;
+  /** Fail the open transaction after the outbox insert. */
+  crashAfterOutbox?: boolean;
+};
+
+export type CheckoutResult = {
+  orderId: string;
+  replay: boolean;
 };
 
 /**
- * One transaction: atomic stock decrement, balance debit, order, line, queue task.
- * A rejected stock or balance check throws and rolls the whole unit back.
+ * One transaction: stock, balance, order, line, task, idempotency key, and the
+ * outbox row. Nothing is published here. The broker cannot roll back with us.
  */
 export async function checkout(
   dataSource: DataSource,
   input: CheckoutInput,
-): Promise<{ orderId: string }> {
+): Promise<CheckoutResult> {
   if (input.qty <= 0) {
     throw new Error('qty must be positive');
   }
 
-  const event = await dataSource.transaction(async (manager) => {
+  return dataSource.transaction(async (manager) => {
+    if (input.idempotencyKey) {
+      const existing = queryRows<{ order_id: string }>(
+        await manager.query(
+          `SELECT order_id::text AS order_id
+           FROM idempotency_keys
+           WHERE "key" = $1`,
+          [input.idempotencyKey],
+        ),
+      );
+      if (existing.length > 0) {
+        return { orderId: existing[0].order_id, replay: true };
+      }
+    }
+
     const stockRows = queryRows<{ id: string; price_cents: number }>(
       await manager.query(
         `UPDATE products
@@ -79,25 +110,38 @@ export async function checkout(
       [orderId],
     );
 
-    return orderPlacedEvent({
-      eventId: `order.placed:${orderId}`,
-      orderId,
+    if (input.idempotencyKey) {
+      const claimed = queryRows<{ key: string }>(
+        await manager.query(
+          `INSERT INTO idempotency_keys ("key", order_id)
+           VALUES ($1, $2)
+           ON CONFLICT ("key") DO NOTHING
+           RETURNING "key"`,
+          [input.idempotencyKey, orderId],
+        ),
+      );
+      if (claimed.length === 0) {
+        throw new Error('idempotency key was claimed by a concurrent request');
+      }
+    }
+
+    const event = toOrderPlacedEvent({
+      id: orderId,
       buyerId: input.buyerId,
       productId: input.productId,
       qty: input.qty,
       totalCents: total,
     });
-  });
+    await manager.query(
+      `INSERT INTO outbox (aggregate_type, aggregate_id, type, payload)
+       VALUES ($1, $2, $3, $4::jsonb)`,
+      ['order', orderId, event.type, JSON.stringify(event)],
+    );
 
-  // The sale is already committed. A missed confirm is the outbox gap, not a second charge.
-  if (process.env.BROKER_URL) {
-    try {
-      await publishOrderPlaced(event);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`order.placed confirm failed for ${event.eventId}: ${message}`);
+    if (input.crashAfterOutbox) {
+      throw new CheckoutWriteFailed();
     }
-  }
 
-  return { orderId: event.data.orderId };
+    return { orderId, replay: false };
+  });
 }
