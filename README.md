@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -53,6 +53,9 @@ npm run demo:retry
 npm run demo:publish
 npm run demo:dlq
 npm run demo:duplicate
+npm run demo:outbox
+npm run demo:crash-write
+npm run demo:crash-relay
 ```
 
 ## TypeORM (HW-13)
@@ -206,7 +209,7 @@ curl -sN --max-time 2 -H 'Last-Event-ID: 3' "http://localhost:3000/orders/${ID}/
 
 ## Async-події через RabbitMQ
 
-Realtime з ДЗ #18 віддає статус тому, хто підключений зараз. `order.placed` іде іншим каналом: брокер тримає повідомлення, поки зʼявиться споживач. Продюсер — `checkout` після коміту продажу. У тілі — контракт `eventId`, `type`, `occurredAt`, `data`. `eventId` стабільний: `order.placed:<id замовлення>`, за ним споживач впізнає дубль.
+Realtime з ДЗ #18 віддає статус тому, хто підключений зараз. `order.placed` іде іншим каналом: брокер тримає повідомлення, поки зʼявиться споживач. Продюсер більше не публікує з `checkout`: продаж і рядок outbox комітяться разом, а в брокер подію виносить relay (ДЗ #22). У тілі — контракт `eventId`, `type`, `occurredAt`, `data`. `eventId` стабільний: `order.placed:<id замовлення>`, за ним споживач впізнає дубль.
 
 Топологію оголошує споживач і бутстрап демо, не продюсер. Topic-exchange `shop.events`, quorum-черга `shop.order.placed` з binding на `order.placed`, DLX `shop.events.dlx` і окрема черга `shop.order.placed.dlq` (`x-dead-letter-exchange` на робочій черзі). На exchange висить `alternate-exchange`: routing key без binding інакше зникає мовчки, а confirm продюсер все одно отримує. Публікація — `createConfirmChannel`, `waitForConfirms` і `mandatory: true`.
 
@@ -220,7 +223,7 @@ prefetch=20, бо ефект — один INSERT: пʼять підтвердж�
 
 Це at-least-once доставка, не exactly-once. Підтвердження брокера означає «я більше не вимагаю повтору», а не «ефект стався рівно один раз». Якщо процес гине після ефекту і до ack, те саме повідомлення приїде знову — `demo:duplicate` це й показує. Exactly-once доставки немає ні в кого. Результат один, бо до at-least-once додано ідемпотентний ефект: повтор не вставляє другий рядок.
 
-Щілина між позначкою «вже оброблено» і окремим ефектом лишається, якщо комітити їх двома транзакціями. Тут позначка і є ефектом — один `INSERT` в одному коміті. Спільного COMMIT бази й брокера все одно немає: `checkout` публікує вже після коміту продажу, тож краш у цьому вікні губить подію. Це закриє transactional outbox у ДЗ #22.
+Щілина між позначкою «вже оброблено» і окремим ефектом лишається, якщо комітити їх двома транзакціями. Ефект у `order_placed_effects` і рядок `processed_messages` пишуться одним COMMIT. Спільного COMMIT бази й брокера немає: його закриває outbox, не публікація зсередини транзакції продажу.
 
 Брокер — RabbitMQ 4.2.9, образ `rabbitmq:4.2-management`. Серія 4.2 — LTS до 30.06.2030. Черги quorum: у них працює delivery-limit, а класичне дзеркалювання (`ha-mode`) з 4.0 прибране.
 
@@ -252,6 +255,63 @@ deliveries=2
 effect=1
 skipped=1
 ```
+
+## Outbox та ідемпотентність
+
+Оформлення замовлення (`checkout`) пише бізнес-рядки і рядок `outbox` в одній транзакції TypeORM. У транзакції немає `publish`: брокер не відкочується разом із Postgres. У `payload` лежить контракт `toOrderPlacedEvent` (`eventId`, `type`, `occurredAt`, `data`), не ORM-сутність.
+
+Relay на одному клієнті з пулу: `BEGIN` → `SELECT … WHERE published_at IS NULL ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT N` → `publish` → `UPDATE published_at` → `COMMIT`. Частковий індекс `idx_outbox_unpublished` покриває лише `published_at IS NULL`.
+
+Ідемпотентність на трьох рівнях:
+
+1. Ефект — `INSERT` у `order_placed_effects` з `ON CONFLICT (event_id) DO NOTHING`. Повтор не робить `qty = qty - 1`.
+2. Inbox — `processed_messages (message_id, consumer)` в тій самій транзакції, що й ефект. Обидва рядки або є, або їх немає.
+3. `Idempotency-Key` на краю операції — рядок у `idempotency_keys`. Ключ називає намір клієнта. Хеш тіла зліпив би два легітимні однакові замовлення в одне, тому тіло в ключ не входить.
+
+`demo:crash-relay` не шле `kill -9`. Після підтвердженого `publish` relay кидає виняток, і та сама транзакція робить `ROLLBACK` ще до `UPDATE published_at` (як крок 8 у коді лекції). Рядок лишається unpublished, тож наступний прохід публікує його вдруге.
+
+Поміняти місцями `publish` і `UPDATE published_at` не можна. Якщо спершу позначити рядок винесеним, а потім публікувати, відмова publish лишає `published_at` заповненим, і relay цей рядок більше не візьме. Подія втрачена. Зворотний порядок дає дубль: брокер уже прийняв повідомлення, позначка не встигла, наступний poll віддасть те саме ще раз. Дубль знімає ідемпотентний ефект. Втрату не лікує нічого. Помилка publish теж не доводить, що брокера повідомлення не досягло: загубитись могла відповідь, тож «зловив помилку і відкотив» не стирає вже прийняту доставку.
+
+`ORDER BY created_at, id` задає лише порядок вибірки. `SKIP LOCKED` роздає рядки різним воркерам, тож глобального порядку доставки немає. Для `order.placed` він не потрібен: у одного замовлення одна подія. Курсор «усі id більші за останній» був би хибним: identity-номер зʼявляється на `nextval`, а рядок стає видимим лише на `COMMIT`.
+
+Опубліковані рядки не входять у частковий індекс, тож сам poll від них не повільнішає, але таблиця росте. Чистка — окремий прохід, який видаляє рядки з `published_at` старшим за 7 днів. Неопубліковані він не чіпає.
+
+Колонки snake_case (`aggregate_type`, `aggregate_id`). У Debezium Outbox Event Router `route.by.field` за замовчуванням — `aggregatetype` без підкреслення. Перехід на CDC не змінює payload і консюмерів, але потребує `route.by.field=aggregate_type` і `table.field.event.key=aggregate_id`.
+
+Прогін `demo:outbox` (два запити з одним `Idempotency-Key`):
+
+```
+requests=2
+orders=1
+outbox=1
+published=1
+deliveries=1
+effect=1
+processed=1
+```
+
+Прогін `demo:crash-write` (виняток після `INSERT` в outbox, обидва рядки зникають разом):
+
+```
+write-failed=1
+orders=0
+outbox=0
+published=0
+deliveries=0
+effect=0
+```
+
+Прогін `demo:crash-relay` (та сама подія діставлена двічі, ефект один; `published` — це позначені рядки outbox, не кількість publish):
+
+```
+published=1
+deliveries=2
+applied=1
+effect=1
+processed=1
+```
+
+Повторний прогін усіх трьох дав ті самі числа.
 
 ## Configuration
 
