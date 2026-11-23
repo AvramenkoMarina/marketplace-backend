@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -140,6 +140,64 @@ npm start
 ```
 
 API: `http://localhost:3000`
+
+## Realtime (HW-18)
+
+Збірка — `npm start`: `nest build` (tsc з метаданими декораторів) і `node dist/main.js`. `tsx` метадані не емітить, gateway і guard тоді не піднімаються.
+
+Подія `order.status` народжується в `MarketplaceService.updateStatus`. `OrderEventsService` тримає `Subject` і буфер останніх подій; gateway кладе її в кімнату `orders:<id>`, SSE читає ту саму шину.
+
+WebSocket: після `connect` клієнт шле `join` з `{ orderId }` і `auth: { userId }`. `userId` має збігатися з заголовком `X-User-Id`, з яким створили замовлення. Анонімний сокет і чуже замовлення в кімнату не потрапляють. Подія йде лише в `server.to('orders:<id>')`.
+
+```bash
+npm install
+npm start
+```
+
+Інший термінал, коли API вже слухає `:3000`:
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+```
+
+Основний прогін: клієнти в різних кімнатах, очікування `A_RECEIVED=1`, `B_RECEIVED=0`, `exit=0`. `--same-room` садить обох у кімнату замовлення A, тоді успіх — це `B_RECEIVED=1`. Обидва прогони — той самий скрипт.
+
+SSE і чотири зміни статусу (підставте id з відповіді POST):
+
+```bash
+ID=$(curl -s -X POST http://localhost:3000/orders \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: sse-demo' \
+  -H 'X-User-Id: buyer-1' \
+  -d '{"items":[{"product_id":"1","qty":1}]}' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')
+
+curl -sN --max-time 2 -D - -o /dev/null "http://localhost:3000/orders/${ID}/events" | grep -i '^content-type'
+
+for st in paid cancelled pending paid; do
+  curl -s -X PATCH "http://localhost:3000/orders/${ID}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"status\":\"${st}\"}" >/dev/null
+done
+
+curl -sN --max-time 2 -H 'Last-Event-ID: 3' "http://localhost:3000/orders/${ID}/events" | grep '^id:' | head -1
+```
+
+Перший `id:` після `Last-Event-ID: 3` більший за 3. Паралельно з відкритим потоком той самий PATCH дописує живу подію (`id:`, `event:`, `data:` зі `status` у JSON).
+
+## Trade-offs: WebSocket vs SSE
+
+Для нотифікацій «статус замовлення змінився» я лишив би SSE. Канал тут односторонній: клієнту не треба писати в нього нічого, крім підписки, а обрив уже лікує сам протокол — `retry:` і `Last-Event-ID`. WebSocket виправданий, коли клієнт часто шле дані тим самим з’єднанням; для цієї нотифікації друга сторона лише додає рукостиск і повторний `join` після реконнекту.
+
+На двох інстансах кімнати socket.io і буфер SSE живуть у пам’яті процесу, тож клієнт на інстансі A не почує `emit` з інстансу B і не добере події з чужого буфера; це лікується Redis-адаптером socket.io і спільним журналом подій у Redis (лекція, крок 7).
+
+| Критерій | WebSocket | SSE |
+| --- | --- | --- |
+| Напрям каналу | Двонаправлений: клієнт шле `join`, сервер шле `order.status` | Лише сервер → клієнт; зміна статусу лишається звичайним HTTP |
+| Реконект/відновлення | socket.io піднімає сокет сам, але кімнату треба `join`-ити знову, а пропущені події протокол не досилає | Клієнт перевідкриває потік і шле `Last-Event-ID`; сервер віддає події з id більшим за цей номер |
+| Вимоги до інфраструктури | HTTP Upgrade, довге з’єднання, sticky-сесія або спільний адаптер кімнат | Звичайний HTTP; проксі не має буферизувати `text/event-stream` |
+| Ціна на подію | Після рукостискання кадр маленький, але конект і heartbeat висять навіть без подій | Текст у вже відкритій відповіді; дешевше за polling, без окремого протоколу |
 
 ## Configuration
 
@@ -281,6 +339,8 @@ PACT_BROKER_URL=http://127.0.0.1:9292 PACT_PROVIDER_VERSION=1.0.0 npm run verify
 | `GET` | `/orders` | cursor-пагінація |
 | `POST` | `/orders` | обовʼязковий `Idempotency-Key` |
 | `GET` | `/orders/{id}` | |
+| `PATCH` | `/orders/{id}` | зміна статусу, подія `order.status` |
+| `GET` | `/orders/{id}/events` | SSE `text/event-stream` |
 | `GET` | `/health` | uptime (сек) |
 | `GET` | `/db/ping` | `SELECT 1` |
 

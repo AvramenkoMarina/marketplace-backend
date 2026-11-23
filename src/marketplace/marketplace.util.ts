@@ -19,6 +19,7 @@ export type Order = {
   total_cents: number;
   status: 'pending' | 'paid' | 'cancelled';
   createdAt: string;
+  userId: string | null;
 };
 
 export function bodyHash(body: unknown): string {
