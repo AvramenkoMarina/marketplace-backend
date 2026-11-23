@@ -24,6 +24,22 @@ export const envSchema = z.object({
       'BROKER_URL must start with amqp:// or amqps://',
     )
     .optional(),
+
+  REDIS_URL: z
+    .string()
+    .refine(
+      (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
+      'REDIS_URL must start with redis:// or rediss://',
+    )
+    .optional(),
+
+  REDIS_QUEUE_URL: z
+    .string()
+    .refine(
+      (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
+      'REDIS_QUEUE_URL must start with redis:// or rediss://',
+    )
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

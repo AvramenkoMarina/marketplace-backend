@@ -1,12 +1,12 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
 ## Grading
 
-Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. RabbitMQ — образ `rabbitmq:4.2-management`, AMQP на порту хоста `5672` (не `15672`: там лише вебморда). Здоровʼя брокера в compose — `rabbitmq-diagnostics -q check_running`, бо між відкритим TCP-портом і готовим `basic.publish` є вікно `ECONNRESET`. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*`, `DATABASE_URL` і `BROKER_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
+Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. RabbitMQ — образ `rabbitmq:4.2-management`, AMQP на порту хоста `5672` (не `15672`: там лише вебморда). Здоровʼя брокера в compose — `rabbitmq-diagnostics -q check_running`, бо між відкритим TCP-портом і готовим `basic.publish` є вікно `ECONNRESET`. Redis два: кеш `redis://127.0.0.1:16379` (`maxmemory 32mb`, `allkeys-lru`) і черга `redis://127.0.0.1:16380` (`noeviction`, AOF everysec). Порти навмисно не 6379/6380 і не з діапазону лекції 22300–22399. Сесії і лічильник ліміту лежать у черговому інстансі. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*`, `DATABASE_URL`, `BROKER_URL`, `REDIS_URL` і `REDIS_QUEUE_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
 
 ```bash
 docker compose up -d --wait
@@ -16,6 +16,10 @@ export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=marketplac
 export DATABASE_URL=postgres://marketplace:marketplace_secret@127.0.0.1:6432/marketplace
 
 export BROKER_URL=amqp://app:app@127.0.0.1:5672
+
+export REDIS_URL=redis://127.0.0.1:16379
+
+export REDIS_QUEUE_URL=redis://127.0.0.1:16380
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 
@@ -56,6 +60,10 @@ npm run demo:duplicate
 npm run demo:outbox
 npm run demo:crash-write
 npm run demo:crash-relay
+npm run demo:cache
+npm run demo:session
+npm run demo:ratelimit
+npm run demo:queue
 ```
 
 ## TypeORM (HW-13)
@@ -313,6 +321,71 @@ processed=1
 
 Повторний прогін усіх трьох дав ті самі числа.
 
+## Redis: кеш, сесії, ліміти, черга
+
+Два контейнери, бо політики памʼяті несумісні в одному процесі. `maxmemory` спільна на весь інстанс, тож `SELECT 1` їх не розведе. Кеш (`redis-cache`, порт хоста `16379`) має `maxmemory 32mb` і `allkeys-lru`. Черга (`redis-queue`, порт хоста `16380`) має `maxmemory-policy noeviction` і AOF `everysec`: BullMQ не працює, якщо Redis викидає ключі довільно.
+
+Сесії і лічильник ліміту лежать у черговому інстансі, не в кеші. `allkeys-lru` колись викине сесію, і користувача розлогінить без способу це відтворити. Третій контейнер для цього не потрібен: черга якраз не витісняє ключі.
+
+Картка товару (ціна, залишок, сума продажів) читається cache-aside. Промах іде в Postgres, влучання — лише в Redis. TTL = `300 + (індекс mod 61)` секунд, розкид 0…60, тож ключі одного прогріву не протухають в одну секунду. Запис у кеш обгорнутий: переповнений кеш не валить запит.
+
+Лавину закриває single-flight лок: `SET lock NX PX`, решта чекає і перечитує кеш. Знімається лок лише свій, Lua compare-and-delete. Голий `DEL` зняв би чужий.
+
+Сесія — рядок у Redis із rolling TTL (`GETEX`). Після рестарту процесу ключ лишається. Між запитами демо чекає 1.5 с, інакше TTL у секундах не встигає зменшитись.
+
+Ліміт — ковзне вікно одним Lua-скриптом, спільний ключ на два поди. Сплеск на межі вікна не дозволяємо: фіксоване вікно пропустило б до двох лімітів за частку секунди, а три команди замість одного скрипта протікали б саме під навантаженням.
+
+Черга BullMQ перераховує рейтинг поза HTTP. `attempts` 5, `backoff` exponential із jitter, `jobId` дедуплікує два `add` в одну задачу. `removeOnComplete` — за віком, не `true`, інакше дедуп вимикається. Планувальник — `upsertJobScheduler`, не `add` на кожен старт.
+
+Прогін `demo:cache`:
+
+```
+cache-lru=1
+cache-maxmemory=1
+warmed=50
+ttl-distinct=50
+concurrent=20
+db-calls=1
+db-calls-warm=0
+```
+
+Прогін `demo:session`:
+
+```
+requests=3
+sessions=1
+in-redis=1
+ttl-renewed=1
+```
+
+Прогін `demo:ratelimit`:
+
+```
+instances=2
+limit=5
+requests=8
+allowed=5
+blocked=3
+status=429
+retry-after=1
+```
+
+Прогін `demo:queue`:
+
+```
+queue-noeviction=1
+attempts=3
+completed=1
+added=2
+queued=1
+schedulers=1
+scheduled-runs=2
+```
+
+Повторний прогін дав ті самі числа.
+
+Якщо stampede-лок зламається, два запити одночасно підуть у базу і прочитають картку двічі. Це прийнятно: лок тут оптимізація, а не захист інваріанта. Зіпсувати залишок або баланс він не може — їх рухає транзакція checkout. Найгірша ціна збою лока — зайвий SELECT і кілька центів, не подвійний продаж.
+
 ## Configuration
 
 Усі змінні описані в `src/config/env.schema.ts` (zod) і проходять
@@ -326,6 +399,8 @@ processed=1
 | `DB_URL` | так | сховище | URL **без пароля** через PgBouncer, напр. `postgresql://marketplace@localhost:6432/marketplace` |
 | `DB_PASSWORD_FILE` | так | сховище | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
 | `BROKER_URL` | ні | сховище | AMQP URL RabbitMQ, напр. `amqp://app:app@127.0.0.1:5672`. Порт `5672`, не `15672` |
+| `REDIS_URL` | ні | сховище | Кеш Redis, `allkeys-lru`, напр. `redis://127.0.0.1:16379` |
+| `REDIS_QUEUE_URL` | ні | сховище | Черга Redis, `noeviction`. Сесії і ліміт теж тут, напр. `redis://127.0.0.1:16380` |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 
