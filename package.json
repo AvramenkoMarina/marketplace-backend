@@ -1,7 +1,7 @@
 {
   "name": "marketplace-api",
   "version": "1.1.0",
-  "description": "Marketplace API — authn/authz, refresh rotation, and RBAC (HW-24)",
+  "description": "Marketplace API — object storage, presigned upload, multipart resume, and a private-bucket cache (HW-26)",
   "private": true,
   "scripts": {
     "build": "node init && nest build",
@@ -31,6 +31,9 @@
     "demo:auth": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-auth",
     "demo:reuse": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-reuse",
     "demo:rbac": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-rbac",
+    "demo:upload": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-upload",
+    "demo:multipart": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-multipart",
+    "demo:cdn": "bash scripts/with-secrets.sh dev bash scripts/run-built.sh demo-cdn",
     "lint:openapi": "npx @redocly/cli@2.46.0 lint openapi/openapi.yaml",
     "bundle:openapi": "npx @redocly/cli@2.46.0 bundle openapi/openapi.yaml -o spec.json",
     "check:spec": "npm run lint:openapi && npm run bundle:openapi && node scripts/check-spec.cjs",
@@ -44,6 +47,8 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1177.0",
+    "@aws-sdk/s3-request-presigner": "^3.1177.0",
     "@nestjs/common": "^11.0.12",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.12",

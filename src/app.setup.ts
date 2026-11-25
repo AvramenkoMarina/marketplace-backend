@@ -15,7 +15,7 @@ export function configureHttpServer(server: express.Express): void {
       // buffer it until the client disconnects. socket.io is ignored for the
       // same reason; the demo connects with the websocket transport.
       ignorePaths:
-        /^(?:\/health|\/db\/ping|\/socket\.io(?:\/.*)?|\/orders\/[^/]+\/events|\/auth(?:\/.*)?|\/account(?:\/.*)?)(?:\?|$)/,
+        /^(?:\/health|\/db\/ping|\/socket\.io(?:\/.*)?|\/orders\/[^/]+\/events|\/auth(?:\/.*)?|\/account(?:\/.*)?|\/uploads(?:\/.*)?)(?:\?|$)/,
     }),
   );
 }

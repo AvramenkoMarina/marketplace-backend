@@ -1,12 +1,12 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24) + файли: presigned upload, multipart resume і закритий бакет за кешем (HW-26).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
 ## Grading
 
-Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. RabbitMQ — образ `rabbitmq:4.2-management`, AMQP на порту хоста `5672` (не `15672`: там лише вебморда). Здоровʼя брокера в compose — `rabbitmq-diagnostics -q check_running`, бо між відкритим TCP-портом і готовим `basic.publish` є вікно `ECONNRESET`. Redis два: кеш `redis://127.0.0.1:16379` (`maxmemory 32mb`, `allkeys-lru`) і черга `redis://127.0.0.1:16380` (`noeviction`, AOF everysec). Порти навмисно не 6379/6380 і не з діапазону лекції 22300–22399. Сесії і лічильник ліміту лежать у черговому інстансі. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*`, `DATABASE_URL`, `BROKER_URL`, `REDIS_URL` і `REDIS_QUEUE_URL` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
+Свіжий клон, чиста БД. Застосунок і демо ходять у Postgres через PgBouncer (порт хоста `6432`). Прямий порт Postgres — `5433`, лише для адмінського `psql`. RabbitMQ — образ `rabbitmq:4.2-management`, AMQP на порту хоста `5672` (не `15672`: там лише вебморда). Здоровʼя брокера в compose — `rabbitmq-diagnostics -q check_running`, бо між відкритим TCP-портом і готовим `basic.publish` є вікно `ECONNRESET`. Redis два: кеш `redis://127.0.0.1:16379` (`maxmemory 32mb`, `allkeys-lru`) і черга `redis://127.0.0.1:16380` (`noeviction`, AOF everysec). Порти навмисно не 6379/6380 і не з діапазону лекції 22300–22399. Сесії і лічильник ліміту лежать у черговому інстансі. S3-емулятор — `pgsty/silo` (MinIO-сумісний API) на порту хоста `22650`, дані в tmpfs `size=1g`. Офіційні образи `minio/minio` і `quay.io/minio/minio` більше не тягнуться анонімно. `SKIP_VAULT=1` — у грейдера немає доступу до сховища: `DB_*`, `DATABASE_URL`, `BROKER_URL`, `REDIS_URL`, `REDIS_QUEUE_URL` і `STORAGE_*` уже в оточенні. `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DATABASE_URL` з оточення; обгортка з `SKIP_VAULT=1` просто їх запускає.
 
 ```bash
 docker compose up -d --wait
@@ -20,6 +20,16 @@ export BROKER_URL=amqp://app:app@127.0.0.1:5672
 export REDIS_URL=redis://127.0.0.1:16379
 
 export REDIS_QUEUE_URL=redis://127.0.0.1:16380
+
+export STORAGE_ENDPOINT=http://127.0.0.1:22650
+
+export STORAGE_REGION=us-east-1
+
+export STORAGE_ACCESS_KEY=hw26user
+
+export STORAGE_SECRET_KEY=hw26secretpass
+
+export STORAGE_BUCKET=hw26-files
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 
@@ -91,6 +101,117 @@ npm run demo:queue
 npm run demo:auth
 npm run demo:reuse
 npm run demo:rbac
+npm run demo:upload
+npm run demo:multipart
+npm run demo:cdn
+```
+
+## Файли
+
+Файл іде трьома кроками: `POST /uploads/intent` (гард із ДЗ #24, allowlist `contentType`, ключ `uploads/{userId}/{uuid}.{ext}`), клієнт кладе байти за presigned URL прямо у сховище, `POST /uploads/commit` робить `HeadObject` і лише тоді ставить `COMPLETED`. `filename` клієнта у ключ не потрапляє. Рядок у таблиці `files` (`key`, `owner_id`, `status`, `size`, `upload_id`) зʼявляється ще в статусі `PENDING`. Подвійний тап закриває `Idempotency-Key`: той самий ключ не створює другий обʼєкт.
+
+Креденшели сховища живуть у сховищі секретів ДЗ #11 і доїжджають через `scripts/with-secrets.sh`. Нового env-файла немає. Дев-значення стенда лежать у `docker-compose.yml` — це пароль compose, не секрет продакшена.
+
+| Змінна | Обовʼязкова | Джерело | Навіщо |
+|--------|-------------|---------|--------|
+| `STORAGE_ENDPOINT` | ні | сховище секретів | Порожньо — AWS S3. Емулятор: `http://127.0.0.1:22650` |
+| `STORAGE_REGION` | ні (default `us-east-1`) | сховище секретів | Регіон підпису SigV4 |
+| `STORAGE_ACCESS_KEY` | так, щоб писати | сховище секретів | Ключ доступу. Витік — це право читати й писати всі файли |
+| `STORAGE_SECRET_KEY` | так, щоб писати | сховище секретів | Секрет підпису presigned URL |
+| `STORAGE_BUCKET` | так, щоб писати | сховище секретів | Бакет `hw26-files` на стенді |
+
+### Строк presigned
+
+`PRESIGN_TTL_SECONDS = 120`. Аватарка з форми обирається і відправляється за хвилину-дві, плюс одна повторна спроба. Presigned URL не можна відкликати: у нього немає `jti` і немає denylist, тож зі стратегій ДЗ #24 лишається тільки короткий строк. Сім днів — стеля SigV4, а не рішення продукту: рядок в access-лозі був би тижнем права на запис, а під роллю STS URL і так помре разом із сесією (часто година). Демо не чекає 120 секунд: `expired=403` знімається тим самим підписом з `expiresIn=1`, бо механізм той самий — годинник у підписі. Прогін повернув `AccessDenied` / `Request has expired`.
+
+### Multipart
+
+Поріг не константа «8 МіБ». Частин не більше 10 000, тож частина не менша за `ceil(файл / 10 000)`. Знизу її тримає правило S3: усі частини, крім останньої, ≥ 5 МіБ, інакше `CompleteMultipartUpload` віддає `EntityTooSmall`. Разом: `partSize = max(5 МіБ, ceil(файл / 10 000))`, multipart коли файл у цю частину не вміщається. Жорсткі 5 МіБ на файлі понад 50 ГіБ дали б більше ніж 10 000 частин.
+
+Документація S3 називає чотири переваги multipart, і розмір файла — лише одна (обʼєкт більший за 5 ГБ інакше не залити). Решта: паралельна пропускна здатність, довантаження лише зірваної частини, старт до того, як відомий фінальний розмір. Демо доводить другу: файл ріжеться на три частини, процес падає після двох, другий процес читає `ListParts` і доливає одну. До `Complete` обʼєкта немає (`HeadObject` → 404). ETag після Complete має суфікс `-N` і не збігається з MD5 файла.
+
+Незавершений multipart тарифікується, хоча обʼєкта в консолі немає. На AWS-бакеті це lifecycle `AbortIncompleteMultipartUpload` через 7 днів. Правило «видалити все старше 30 днів» ці хвости не чіпає: це інша дія.
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+```
+
+`PENDING` старші за добу прибирає `sweepStalePending`: `AbortMultipartUpload`, `DeleteObject`, видалити рядок. У проді це добовий repeatable job BullMQ на черговому Redis з ДЗ #23. Демо його не стартує, щоб прогін не залежав від черги. Список файлів користувача живе в `files`, не в `ListObjects`: лістинг сховища платний і повільний.
+
+### CDN
+
+Обрана форма — локальний edge (`src/storage/edge.ts`), аналог CloudFront + OAC. Бакет приватний. Анонімний GET у сховище дає 403. Edge ходить у бакет своїми креденшелами, кладе відповідь у памʼять і віддає `X-Cache: HIT|MISS`. Кешує лише якщо на обʼєкті вже стоїть `Cache-Control` з `public` і `max-age` > 0. Заголовок ставиться в `PutObject`, не на edge: без нього другий запит теж був би MISS і `cache-hit` був би 0.
+
+Публічний ассет називається за хешем вмісту: `assets/app.<sha256-8>.css`. Заголовок обʼєкта: `public, max-age=31536000, immutable`. Після «деплою» нові байти отримують новий ключ. Старий запис у кеші ніхто не читає, інвалідацій нуль. AWS для файлів, які часто змінюються, радить саме версіонування імені, а не інвалідацію.
+
+Живу дистрибуцію CloudFront цей стенд не піднімає. Політика бакета для того варіанту (без `Condition` її задовольнила б будь-яка дистрибуція у світі):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::hw26-files/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::ACCOUNT_ID:distribution/DISTRIBUTION_ID"
+        }
+      }
+    }
+  ]
+}
+```
+
+Приватний контент сюди не входить. План: `GET /files/:id` лишається за гардом і відповідає `302` на свіжий presigned на хвилину. Сервіс стоїть на шляху авторизації, не на шляху байтів.
+
+### Прогони
+
+`npm run demo:upload`:
+
+```
+intent=200
+key-from-server=1
+api-alive=0
+put-offline=200
+tampered=403
+expired=403
+commit=200
+commit-without-bytes=409
+```
+
+`npm run demo:multipart` двічі поспіль, обидва рази:
+
+```
+head-before-complete=404
+resumed-parts=1
+complete=200
+size-match=1
+etag-multipart=1
+```
+
+`npm run demo:cdn`:
+
+```
+direct=403
+edge-miss=200
+edge-hit=200
+cache-hit=1
+new-name=1
+new-url=200
+content-changed=1
 ```
 
 ## TypeORM (HW-13)
@@ -475,6 +596,11 @@ node -e 'const {createPublicKey,createHash}=require("node:crypto"); const pem=Bu
 | `JWT_PREVIOUS_KID` | ні | сховище | Попередній `kid` на час overlap-ротації |
 | `JWT_PREVIOUS_PUBLIC_KEY` | ні | сховище | Попередній публічний ключ ES256, base64 PEM |
 | `REFRESH_TOKEN_PEPPER` | так | сховище | HMAC-перець хеша refresh-токена. Дефолта немає |
+| `STORAGE_ENDPOINT` | ні | сховище | S3 endpoint. Порожньо — AWS. Емулятор: `http://127.0.0.1:22650` |
+| `STORAGE_REGION` | ні (default `us-east-1`) | сховище | Регіон SigV4 |
+| `STORAGE_ACCESS_KEY` | ні | сховище | Ключ доступу до бакета. Без нього завантаження відповідає 503 |
+| `STORAGE_SECRET_KEY` | ні | сховище | Секрет підпису. Без нього завантаження відповідає 503 |
+| `STORAGE_BUCKET` | ні | сховище | Імʼя бакета |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 

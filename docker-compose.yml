@@ -113,6 +113,27 @@ services:
       retries: 20
       start_period: 15s
 
+  minio:
+    # Upstream minio/minio and quay.io/minio/minio no longer pull anonymously.
+    # SILO is a MinIO-compatible server: same S3 API, same MINIO_ROOT_* env.
+    image: pgsty/silo:RELEASE.2026-11-12T00-00-00Z
+    container_name: marketplace-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: hw26user
+      MINIO_ROOT_PASSWORD: hw26secretpass
+    ports:
+      - '22650:9000'
+    # tmpfs smaller than 1g dies mid-demo (multipart parts are 5 MiB each).
+    tmpfs:
+      - /data:size=1g
+    healthcheck:
+      test: ['CMD', 'silo', 'healthcheck', 'ready']
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
 volumes:
   marketplace_pg:
   marketplace_rabbit:

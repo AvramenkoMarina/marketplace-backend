@@ -5,6 +5,8 @@ import { validate } from './config/env.schema';
 import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health/health.controller';
 import { MarketplaceModule } from './marketplace/marketplace.module';
+import { UploadsModule } from './storage/uploads.module';
+
 
 @Module({
   imports: [
@@ -15,6 +17,7 @@ import { MarketplaceModule } from './marketplace/marketplace.module';
     DatabaseModule,
     AuthModule,
     MarketplaceModule,
+    UploadsModule,
   ],
   controllers: [HealthController],
 })
