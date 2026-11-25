@@ -5,8 +5,9 @@ import { Order } from "./entities/order.entity";
 import { Product } from "./entities/product.entity";
 import { User } from "./entities/user.entity";
 import { Task } from "./entities/task.entity";
+import { StoredFile } from "./entities/stored-file.entity";
 
-const entities = [User, Product, Order, OrderItem, Task];
+const entities = [User, Product, Order, OrderItem, Task, StoredFile];
 
 type DataSourceOverrides = {
   logging?: DataSourceOptions["logging"];

@@ -69,6 +69,20 @@ export const envSchema = z.object({
 
   REFRESH_TOKEN_PEPPER: z.string().trim().min(1, 'REFRESH_TOKEN_PEPPER is required'),
 
+  // Empty endpoint means real AWS S3. Emulators (MinIO, LocalStack) set a URL.
+  STORAGE_ENDPOINT: optionalEnvString,
+
+  STORAGE_REGION: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().trim().min(1).default('us-east-1'),
+  ),
+
+  STORAGE_ACCESS_KEY: optionalEnvString,
+
+  STORAGE_SECRET_KEY: optionalEnvString,
+
+  STORAGE_BUCKET: optionalEnvString,
+
   JWT_PREVIOUS_KID: optionalEnvString,
 
   JWT_PREVIOUS_PUBLIC_KEY: optionalEnvString,
