@@ -12,3 +12,7 @@ coverage/
 *.tsbuildinfo
 backups/
 config.bat
+.npm_token
+.pulumi/
+.trivy-cache/
+.kubectl-proxy.log

@@ -1,8 +1,29 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24) + файли: presigned upload, multipart resume і закритий бакет за кешем (HW-26).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24) + файли: presigned upload, multipart resume і закритий бакет за кешем (HW-26) + викочування без втрачених відповідей на локальному kind (HW-28).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
+
+## Kubernetes
+
+Процес у поді — `k8s/server.mjs`. Він не стартує без `APP_DB_PASSWORD`, чекає 4 с до `listen()` (вікно, у якому в бойовому сервісі відкривається пул і проходять міграції) і на `SIGTERM` спершу гасить `/readyz`, витримує дренаж 10 с і лише потім закриває сокет. Поки сокет відкритий, звичайний запит і далі отримує 200: інакше балансувальник, який ще не встиг прибрати ендпоінт, побачив би обрив. `/healthz` лишається зеленим увесь час життя процесу, включно з дренажем, тож liveness не вбиває под посеред graceful shutdown.
+
+Образ збирається з `docker/Dockerfile`: стадія `npm ci` і фінальна `gcr.io/distroless/nodejs22-debian12:nonroot`. У фіналі немає shell, процес працює як uid `65532`. Токен приватного реєстру — файл `.npm_token` (у git його немає), його бачить лише `RUN --mount=type=secret`. Приманка з випадковим рядком доводить те саме: рядок не потрапляє ні в історію, ні в config, ні в шари `docker save`.
+
+Кластер підіймав **kind** (один control-plane, `k8s/kind-config.yaml`). Окремий `--memory` kind не приймає: вузол бере памʼять з Docker Desktop (тут 3.8 ГіБ). На прогоні `docker stats` показав control-plane близько 959 МіБ.
+
+`spec.replicas: 2` лишається в Deployment навмисно. У kind немає metrics-server, тож HPA показує `cpu: <unknown>/70%` і репліки не пише — без явного `replicas` після створення подів не було б. У бойовому кластері з metrics-server це вже конфлікт володіння полем: і Pulumi, і HPA пишуть `spec.replicas`. Наступний `pulumi up` повернув би число з програми і стер би скейл. Власник має бути один: або прибрати `replicas` зі спеки (і не вирівнювати різницю), або не оголошувати HPA.
+
+Промисловий секрет у под їде не через env-файл. External Secrets Operator синхронізує значення зі сховища в K8s Secret своїм CR. CSI Secret Store монтує його файлом у под, і в etcd окремий Secret може не зʼявлятись. Обидва прибирають секрет з git. У цей кластер оператор не ставиться: `scripts/with-secrets.sh` віддає значення в програму, Pulumi кладе його в Secret як `data` (base64). Base64 — не шифрування: у kind etcd лежить відкритим текстом, бо `encryption-provider-config` не увімкнений. «Поклав у Secret» тут означає «прибрав із git і з маніфесту Deployment».
+
+Готовність пода — конʼюнкція контейнерів. Поруч з `api` живе `log-sidecar` на тому самому образі (порт 3001). Поки sidecar не зелений, Service не шле трафік на здоровий `api`. Саме тому sidecar має власні проби і на `SIGTERM` теж спершу гасить readiness, а не зникає миттєво.
+
+`startupProbe` на `/healthz` (`periodSeconds: 1`, `failureThreshold: 30`) тримає liveness і readiness вимкненими, доки процес не почав слухати. Бюджет до першого рестарту — 30 с, прогрів 4 с у нього вміщається. Якби замість цього була лише liveness з `periodSeconds: 1`, `failureThreshold: 3` і `initialDelaySeconds: 0`, перший рестарт настав би через 3 с — раніше за `listen()`.
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `APP_DB_PASSWORD` | сховище (#11) | пароль до БД, їде в K8s Secret `marketplace-db` і в под лише через `secretKeyRef` |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | ключ шифрування локального стану Pulumi (`file://`) |
 
 ## Grading
 
@@ -106,6 +127,38 @@ npm run demo:multipart
 npm run demo:cdn
 ```
 
+### HW-28
+
+Локальний файловий бекенд Pulumi. У грейдера немає доступу до сховища: `SKIP_VAULT=1`, значення вже в оточенні. Після перевірки: `npm run destroy && npm run cluster:down`.
+
+```bash
+export SKIP_VAULT=1            # у грейдера немає доступу до сховища
+
+export APP_DB_PASSWORD=grader-secret
+
+export PULUMI_BACKEND_URL="file://$PWD/.pulumi"
+
+export PULUMI_CONFIG_PASSPHRASE=hw28-grading
+
+npm --prefix infra ci
+
+printf 'dummy-npm-token' > .npm_token   # секрет етапу збірки; у git його немає
+
+npm run image:build            # docker/Dockerfile -> marketplace-api:hw28
+
+npm run cluster:up             # kind create + kind load docker-image
+
+npm run up                     # pulumi up
+
+npm run demo:image
+
+npm run demo:rollout
+
+npm run demo:pdb
+
+SCAN_MAX=40 npm run scan       # робочий поріг CI; -1 і 99999 — це перевірка, що вердикт пораховано
+```
+
 ## Файли
 
 Файл іде трьома кроками: `POST /uploads/intent` (гард із ДЗ #24, allowlist `contentType`, ключ `uploads/{userId}/{uuid}.{ext}`), клієнт кладе байти за presigned URL прямо у сховище, `POST /uploads/commit` робить `HeadObject` і лише тоді ставить `COMPLETED`. `filename` клієнта у ключ не потрапляє. Рядок у таблиці `files` (`key`, `owner_id`, `status`, `size`, `upload_id`) зʼявляється ще в статусі `PENDING`. Подвійний тап закриває `Idempotency-Key`: той самий ключ не створює другий обʼєкт.
@@ -114,11 +167,11 @@ npm run demo:cdn
 
 | Змінна | Обовʼязкова | Джерело | Навіщо |
 |--------|-------------|---------|--------|
-| `STORAGE_ENDPOINT` | ні | сховище секретів | Порожньо — AWS S3. Емулятор: `http://127.0.0.1:22650` |
-| `STORAGE_REGION` | ні (default `us-east-1`) | сховище секретів | Регіон підпису SigV4 |
-| `STORAGE_ACCESS_KEY` | так, щоб писати | сховище секретів | Ключ доступу. Витік — це право читати й писати всі файли |
-| `STORAGE_SECRET_KEY` | так, щоб писати | сховище секретів | Секрет підпису presigned URL |
-| `STORAGE_BUCKET` | так, щоб писати | сховище секретів | Бакет `hw26-files` на стенді |
+| `STORAGE_ENDPOINT` | ні | Infisical (#11) | Порожньо — AWS S3. Емулятор: `http://127.0.0.1:22650` |
+| `STORAGE_REGION` | ні (default `us-east-1`) | Infisical (#11) | Регіон підпису SigV4 |
+| `STORAGE_ACCESS_KEY` | так, щоб писати | Infisical (#11) | Ключ доступу. Витік — це право читати й писати всі файли |
+| `STORAGE_SECRET_KEY` | так, щоб писати | Infisical (#11) | Секрет підпису presigned URL |
+| `STORAGE_BUCKET` | так, щоб писати | Infisical (#11) | Бакет `hw26-files` на стенді |
 
 ### Строк presigned
 
@@ -554,14 +607,14 @@ Access-токен — JWT ES256 на 10 хвилин. Refresh — випадко
 
 | Змінна | Джерело | Навіщо |
 |---|---|---|
-| `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів, ES256 PKCS8 PEM у base64 |
-| `JWT_PUBLIC_KEY` | сховище (#11) | перевірка підпису, ES256 SPKI PEM у base64 |
-| `JWT_KID` | сховище (#11) | `kid` поточного ключа; у dev і prod різний |
-| `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-перець хеша refresh-токена |
-| `JWT_PREVIOUS_KID` | сховище (#11), лише на час overlap | `kid` попереднього публічного ключа |
-| `JWT_PREVIOUS_PUBLIC_KEY` | сховище (#11), лише на час overlap | публічний ключ, яким ще перевіряються старі access |
-| `DB_URL` | сховище (#11) | URL Postgres без пароля |
-| `DB_PASSWORD_FILE` | сховище (#11) | файл із паролем БД |
+| `JWT_PRIVATE_KEY` | Infisical (#11) | підпис access-токенів, ES256 PKCS8 PEM у base64 |
+| `JWT_PUBLIC_KEY` | Infisical (#11) | перевірка підпису, ES256 SPKI PEM у base64 |
+| `JWT_KID` | Infisical (#11) | `kid` поточного ключа; у dev і prod різний |
+| `REFRESH_TOKEN_PEPPER` | Infisical (#11) | HMAC-перець хеша refresh-токена |
+| `JWT_PREVIOUS_KID` | Infisical (#11), лише на час overlap | `kid` попереднього публічного ключа |
+| `JWT_PREVIOUS_PUBLIC_KEY` | Infisical (#11), лише на час overlap | публічний ключ, яким ще перевіряються старі access |
+| `DB_URL` | Infisical (#11) | URL Postgres без пароля |
+| `DB_PASSWORD_FILE` | Infisical (#11) | файл із паролем БД |
 | `DATABASE_URL` | compose / оточення | дев-креденшели для міграцій і демо, секретом не є |
 
 Відбитки публічних ключів (SHA-256 від SPKI DER). Dev і prod — різні пари:
@@ -585,22 +638,22 @@ node -e 'const {createPublicKey,createHash}=require("node:crypto"); const pem=Bu
 |--------|-------------|----------|------|
 | `NODE_ENV` | ні (default `development`) | процес / `.env` | `development` \| `test` \| `production` |
 | `PORT` | ні (default `3000`) | процес / `.env` | HTTP-порт (`z.coerce.number`) |
-| `DB_URL` | так | сховище | URL **без пароля** через PgBouncer, напр. `postgresql://marketplace@localhost:6432/marketplace` |
-| `DB_PASSWORD_FILE` | так | сховище | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
-| `BROKER_URL` | ні | сховище | AMQP URL RabbitMQ, напр. `amqp://app:app@127.0.0.1:5672`. Порт `5672`, не `15672` |
-| `REDIS_URL` | ні | сховище | Кеш Redis, `allkeys-lru`, напр. `redis://127.0.0.1:16379` |
-| `REDIS_QUEUE_URL` | ні | сховище | Черга Redis, `noeviction`. Сесії і ліміт теж тут, напр. `redis://127.0.0.1:16380` |
-| `JWT_KID` | так | сховище | Ідентифікатор поточного ключа підпису ES256 |
-| `JWT_PRIVATE_KEY` | так | сховище | Приватний ключ ES256, PKCS8 PEM у base64. Дефолта немає |
-| `JWT_PUBLIC_KEY` | так | сховище | Публічний ключ ES256, SPKI PEM у base64. Дефолта немає |
-| `JWT_PREVIOUS_KID` | ні | сховище | Попередній `kid` на час overlap-ротації |
-| `JWT_PREVIOUS_PUBLIC_KEY` | ні | сховище | Попередній публічний ключ ES256, base64 PEM |
-| `REFRESH_TOKEN_PEPPER` | так | сховище | HMAC-перець хеша refresh-токена. Дефолта немає |
-| `STORAGE_ENDPOINT` | ні | сховище | S3 endpoint. Порожньо — AWS. Емулятор: `http://127.0.0.1:22650` |
-| `STORAGE_REGION` | ні (default `us-east-1`) | сховище | Регіон SigV4 |
-| `STORAGE_ACCESS_KEY` | ні | сховище | Ключ доступу до бакета. Без нього завантаження відповідає 503 |
-| `STORAGE_SECRET_KEY` | ні | сховище | Секрет підпису. Без нього завантаження відповідає 503 |
-| `STORAGE_BUCKET` | ні | сховище | Імʼя бакета |
+| `DB_URL` | так | Infisical (#11) | URL **без пароля** через PgBouncer, напр. `postgresql://marketplace@localhost:6432/marketplace` |
+| `DB_PASSWORD_FILE` | так | Infisical (#11) | Шлях до файла-секрета з паролем БД (`secrets/db_password`) |
+| `BROKER_URL` | ні | Infisical (#11) | AMQP URL RabbitMQ, напр. `amqp://app:app@127.0.0.1:5672`. Порт `5672`, не `15672` |
+| `REDIS_URL` | ні | Infisical (#11) | Кеш Redis, `allkeys-lru`, напр. `redis://127.0.0.1:16379` |
+| `REDIS_QUEUE_URL` | ні | Infisical (#11) | Черга Redis, `noeviction`. Сесії і ліміт теж тут, напр. `redis://127.0.0.1:16380` |
+| `JWT_KID` | так | Infisical (#11) | Ідентифікатор поточного ключа підпису ES256 |
+| `JWT_PRIVATE_KEY` | так | Infisical (#11) | Приватний ключ ES256, PKCS8 PEM у base64. Дефолта немає |
+| `JWT_PUBLIC_KEY` | так | Infisical (#11) | Публічний ключ ES256, SPKI PEM у base64. Дефолта немає |
+| `JWT_PREVIOUS_KID` | ні | Infisical (#11) | Попередній `kid` на час overlap-ротації |
+| `JWT_PREVIOUS_PUBLIC_KEY` | ні | Infisical (#11) | Попередній публічний ключ ES256, base64 PEM |
+| `REFRESH_TOKEN_PEPPER` | так | Infisical (#11) | HMAC-перець хеша refresh-токена. Дефолта немає |
+| `STORAGE_ENDPOINT` | ні | Infisical (#11) | S3 endpoint. Порожньо — AWS. Емулятор: `http://127.0.0.1:22650` |
+| `STORAGE_REGION` | ні (default `us-east-1`) | Infisical (#11) | Регіон SigV4 |
+| `STORAGE_ACCESS_KEY` | ні | Infisical (#11) | Ключ доступу до бакета. Без нього завантаження відповідає 503 |
+| `STORAGE_SECRET_KEY` | ні | Infisical (#11) | Секрет підпису. Без нього завантаження відповідає 503 |
+| `STORAGE_BUCKET` | ні | Infisical (#11) | Імʼя бакета |
 
 Контракт для людей і CI: `.env.example` (у git). Реальний `.env` і `secrets/` — у `.gitignore`.
 
