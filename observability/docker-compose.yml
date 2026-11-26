@@ -1,0 +1,32 @@
+name: marketplace-observability
+
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.29.0
+    container_name: marketplace-otel-lgtm
+    ports:
+      - '22903:3000'
+      - '22918:4318'
+      - '22917:4317'
+      - '22901:9090'
+      - '22904:3200'
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./grafana/dashboards/red.json:/otel-lgtm/grafana/conf/provisioning/dashboards/custom/red.json:ro
+      - ./grafana/provisioning/dashboards/dashboards.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
+      - ./grafana/provisioning/datasources/prometheus.yml:/otel-lgtm/grafana/conf/provisioning/datasources/marketplace.yaml:ro
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -fsS http://127.0.0.1:3000/api/health && curl -fsS http://127.0.0.1:3200/ready && curl -fsS http://127.0.0.1:9090/-/ready',
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
