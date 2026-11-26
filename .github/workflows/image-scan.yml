@@ -1,0 +1,25 @@
+name: image-scan
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    name: image-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: BuildKit
+        uses: docker/setup-buildx-action@v3
+
+      - name: Decoy registry token
+        run: printf '%s' 'ci-npm-token' > .npm_token
+
+      - name: Build production image
+        run: npm run image:build
+
+      - name: Scan with the working threshold
+        run: SCAN_MAX=40 npm run scan
