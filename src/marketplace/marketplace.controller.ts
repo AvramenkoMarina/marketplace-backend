@@ -9,6 +9,7 @@ import {
   Body,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { controllerCreateOrder, controllerGetOrder } from '../observability/order-flow';
 import { MarketplaceService } from './marketplace.service';
 
 @Controller()
@@ -40,7 +41,7 @@ export class MarketplaceController {
 
   @Get('orders/:id')
   getOrder(@Param('id') id: string) {
-    return this.marketplace.getOrder(id);
+    return controllerGetOrder(id, (orderId) => this.marketplace.getOrder(orderId));
   }
 
   @Post('orders')
@@ -51,7 +52,9 @@ export class MarketplaceController {
     @Res({ passthrough: false }) res: Response,
   ) {
     // Header required перевіряє express-openapi-validator; тут ключ уже є.
-    const result = this.marketplace.createOrder(key, body, ownerFromHeader(userId));
+    const result = controllerCreateOrder(() =>
+      this.marketplace.createOrder(key, body, ownerFromHeader(userId)),
+    );
     for (const [name, value] of Object.entries(result.headers)) {
       res.setHeader(name, value);
     }

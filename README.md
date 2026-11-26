@@ -1,6 +1,6 @@
 # Marketplace API
 
-Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24) + файли: presigned upload, multipart resume і закритий бакет за кешем (HW-26) + викочування без втрачених відповідей на локальному kind (HW-28).
+Курсовий проєкт: OpenAPI-контракт (HW-09) + Nest configuration & secrets (HW-11) + дата-шар Postgres (HW-12) + TypeORM entities, міграції та N+1 (HW-13) + конкурентний checkout (HW-14) + PgBouncer і backup/restore (HW-15) + інтеграційні тести, E2E і Pact (HW-16) + realtime-нотифікації статусу замовлення (HW-18) + async-події `order.placed` через RabbitMQ (HW-19) + transactional outbox і ідемпотентний ефект (HW-22) + Redis: кеш, сесії, ліміт і черга BullMQ (HW-23) + автентифікація, ротація refresh і RBAC (HW-24) + файли: presigned upload, multipart resume і закритий бакет за кешем (HW-26) + викочування без втрачених відповідей на локальному kind (HW-28) + логи, RED-метрики і трейси з одним `trace_id` (HW-29).
 
 Головна таблиця: `orders`. Таблиця пошуку: `products`.
 
@@ -24,6 +24,78 @@
 |---|---|---|
 | `APP_DB_PASSWORD` | сховище (#11) | пароль до БД, їде в K8s Secret `marketplace-db` і в под лише через `secretKeyRef` |
 | `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | ключ шифрування локального стану Pulumi (`file://`) |
+
+## Observability
+
+Питання «о 03:15 один запит віддав 500» закривається трьома сигналами з одним ключем. Корелятор у логу — `trace_id` активного спана OpenTelemetry (`trace.getActiveSpan()?.spanContext().traceId` у mixin pino), а не окремий uuid. `userId`, `tenant` і `idempotencyKey` лежать в `AsyncLocalStorage`: жоден шар не приймає `req` заради логування. `GET /orders/:id` і `POST /orders` проходять контролер, сервіс і репозиторій (`logger.child({ layer })`). Репозиторій відкриває вкладений спан `orders.repo.read` / `orders.repo.insert`.
+
+Логи — JSON у stdout. `redact` ховає лише описані шляхи: `req.headers.authorization`, `req.body.password`, `req.body.refresh_token`. Вкладене поле без шляху в списку лишається видимим, тому шлях до пароля з `POST /auth/login` записаний явно.
+
+RED рахує middleware на відповіді. Лейбл `route` — шаблон (`/orders/:id`), не сирий шлях. `status` — HTTP-код. Гістограма, не summary.
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | сховище (#11) | OTLP HTTP колектора, `http://127.0.0.1:22918` |
+| `PROMETHEUS_URL` | сховище (#11) | Prometheus стенда, `http://127.0.0.1:22901` |
+| `TRACE_API_URL` | сховище (#11) | Tempo query API, `http://127.0.0.1:22904` |
+| `GRAFANA_ADMIN_USER` | сховище (#11) | логін Grafana, на стенді `admin` |
+| `GRAFANA_ADMIN_PASSWORD` | сховище (#11) | пароль Grafana, на стенді `admin` |
+
+Стенд — один контейнер `grafana/otel-lgtm:0.29.0` (`observability/docker-compose.yml`): Grafana `22903`, OTLP HTTP `22918`, Prometheus `22901`, Tempo `22904`. Датасорс Prometheus провіжиться `observability/grafana/provisioning/datasources/prometheus.yml` (uid `prometheus`, у контейнері `http://127.0.0.1:9090`). Дашборд — `observability/grafana/dashboards/red.json`. Prometheus додатково скрейпить `host.docker.internal:3000/metrics`, тож панелі бачать процес на порту застосунку.
+
+Годинник хоста і контейнера збігся: `date +%s` і `docker run --rm alpine:3.20 date +%s` обидва дали `1795691835`.
+
+Памʼять. До стенда `docker stats --no-stream` не показував його. Одразу після `up --wait` контейнер `marketplace-otel-lgtm` тримав **306.5 МіБ** з ліміту Docker Desktop 3.826 ГіБ. Після трьох демо (трейси вже в Tempo) той самий контейнер виріс до **734 МіБ**. Control-plane kind з ДЗ #28 був близько 959 МіБ. На старті разом це близько 1.3 ГіБ, під навантаженням демо — близько 1.7 ГіБ: у 3.8 ГіБ вміщається, якщо поруч не висить інший повний стенд. Образ важчий за цифру лекції для холодного старту (239.7 МіБ): тег `0.29.0` тягне ще й Pyroscope.
+
+Бакети гістограми, секунди: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30`. Верхня скінченна межа — 30 с. Локальний `GET /orders/:id` укладається в мілісекунди, очікування лока на checkout (ДЗ #14) — у секунди. 30 с вище за обидва. `histogram_quantile` дивиться на `le`: якщо спостереження вилітають за останній скінченний бакет, квантиль прилипає до межі і графік виглядає здоровим саме тоді, коли все погано. `above-top-bucket` — це `_count` мінус `_bucket{le="30"}` для маршруту `/orders/:id`.
+
+Три панелі дашборда, вікно `[1m]`:
+
+| Панель | Питання RED | PromQL |
+|---|---|---|
+| Rate | скільки запитів за секунду? | `sum(rate(http_requests_total[1m]))` |
+| Errors | скільки відповідей 5xx за секунду? | `sum(rate(http_requests_total{status=~"5.."}[1m]))` |
+| Duration | яка затримка на 95-му перцентилі? | `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[1m])))` |
+
+Три прогони поспіль дали той самий вивід.
+
+`demo:logs`:
+
+```
+non-json-lines=0
+layers=4
+distinct-trace-ids=1
+trace-id-matches-header=1
+burst=8
+burst-trace-ids=8
+burst-uneven=0
+secret-req-logged=1
+secret-in-logs=0
+```
+
+`demo:metrics`:
+
+```
+sent-ok=40
+sent-fail=15
+counter-delta=55
+errors-delta=15
+above-top-bucket=0
+series-before=1
+series-after=1
+```
+
+`demo:trace`:
+
+```
+spans=2
+orphan-spans=0
+trace-matches-header=1
+trace-matches-log=1
+span-status-error=1
+```
+
+SLI — частка запитів до `/orders` зі статусом нижче 500 за ковзні 30 діб. SLO — 99,5 % таких запитів успішні. Бюджет помилок: 0,005 × 30 діб × 24 год × 60 хв = 216 хвилин на місяць.
 
 ## Grading
 
@@ -157,6 +229,31 @@ npm run demo:rollout
 npm run demo:pdb
 
 SCAN_MAX=40 npm run scan       # робочий поріг CI; -1 і 99999 — це перевірка, що вердикт пораховано
+```
+
+### HW-29
+
+Стенд спостережуваності, не основний `docker-compose.yml`. У грейдера немає доступу до сховища: `SKIP_VAULT=1`, адреси колектора вже в оточенні. Команди з каталогу, де лежить `package.json`.
+
+```bash
+docker compose -f observability/docker-compose.yml up -d --wait
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:22918
+
+export PROMETHEUS_URL=http://127.0.0.1:22901
+
+export TRACE_API_URL=http://127.0.0.1:22904
+
+export GRAFANA_ADMIN_USER=admin
+
+export GRAFANA_ADMIN_PASSWORD=admin
+
+export SKIP_VAULT=1
+
+npm ci
+npm run demo:logs
+npm run demo:metrics
+npm run demo:trace
 ```
 
 ## Файли

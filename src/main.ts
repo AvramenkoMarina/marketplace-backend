@@ -1,3 +1,4 @@
+import './observability/otel';
 import 'reflect-metadata';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -8,6 +9,7 @@ import express from 'express';
 import { AppModule } from './app.module';
 import { configureHttpServer, configureNestApp } from './app.setup';
 import { validate, type Env } from './config/env.schema';
+import { logger } from './observability/logger';
 
 function loadLocalEnv(): void {
   const path = resolve(process.cwd(), '.env');
@@ -40,6 +42,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server), {
     bodyParser: false,
     abortOnError: false,
+    logger: false,
   });
   configureNestApp(app);
 
@@ -47,7 +50,7 @@ async function bootstrap() {
   const port = config.get('PORT', { infer: true });
 
   await app.listen(port);
-  console.log(`Marketplace API listening on http://localhost:${port}`);
+  logger.info({ port }, 'listening');
 }
 
 bootstrap().catch((err: unknown) => {
